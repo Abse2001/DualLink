@@ -2,6 +2,8 @@ using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Media;
 using DualLink.Core;
+using MediaBrushes = System.Windows.Media.Brushes;
+using MediaColor = System.Windows.Media.Color;
 
 namespace DualLink.App;
 
@@ -49,13 +51,13 @@ public partial class MainWindow : Window
             }
             ActiveText.Text = decision.ActiveAdapterId is null ? "" : $"Active: {adapters.FirstOrDefault(x => x.Id == decision.ActiveAdapterId)?.Name}";
             StatusText.Text = decision.Reason;
-            StatusDot.Fill = new SolidColorBrush(probes.Any(x => x.Online) ? Color.FromRgb(34, 197, 94) : Color.FromRgb(239, 68, 68));
+            StatusDot.Fill = new SolidColorBrush(probes.Any(x => x.Online) ? MediaColor.FromRgb(34, 197, 94) : MediaColor.FromRgb(239, 68, 68));
             AppLog.Write(decision.Reason);
         }
         catch (Exception ex)
         {
             StatusText.Text = ex.Message;
-            StatusDot.Fill = Brushes.Red;
+            StatusDot.Fill = MediaBrushes.Red;
             AppLog.Write(ex.ToString());
         }
     }

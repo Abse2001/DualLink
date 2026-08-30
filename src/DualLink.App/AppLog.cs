@@ -1,3 +1,5 @@
+using System.IO;
+
 namespace DualLink.App;
 
 public static class AppLog
