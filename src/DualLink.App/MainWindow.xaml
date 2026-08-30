@@ -11,7 +11,7 @@
     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
     <DockPanel Grid.Row="0" Margin="0,0,0,16">
       <StackPanel DockPanel.Dock="Left"><TextBlock FontSize="32" FontWeight="Bold" Text="DualLink"/><TextBlock Foreground="#CBD5E1" FontSize="14" Text="Reliable Ethernet + hotspot failover for Windows 11"/></StackPanel>
-      <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right"><Button Content="Probe now" Click="ProbeNow_Click"/><Button Content="Restore Windows defaults" Click="Restore_Click"/></StackPanel>
+      <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right"><Button Content="Prepare Proton config" Click="PrepareWireGuard_Click"/><Button Content="Probe now" Click="ProbeNow_Click"/><Button Content="Restore Windows defaults" Click="Restore_Click"/></StackPanel>
     </DockPanel>
     <Border Grid.Row="1" Background="#132238" BorderBrush="#334155" BorderThickness="1" CornerRadius="10" Padding="14" Margin="0,0,0,12">
       <WrapPanel VerticalAlignment="Center">
@@ -41,7 +41,7 @@
       </DataGrid.Columns>
     </DataGrid>
     <Border Grid.Row="4" Margin="0,14,0,0" Padding="12" Background="#3B2A12" BorderBrush="#A16207" BorderThickness="1" CornerRadius="8">
-      <TextBlock Foreground="#FEF3C7" Text="For GTA: connect Proton to one fixed server before launching the game. DualLink keeps Proton on the preferred physical connection and fails over underneath it. A short packet-loss burst is still possible during handover." TextWrapping="Wrap"/>
+      <TextBlock Foreground="#FEF3C7" Text="For GTA: use Prepare Proton config, import the generated -DualLink.conf into WireGuard, then activate it with both links connected. DualLink pins the Proton endpoint outside the tunnel and switches that endpoint between physical links." TextWrapping="Wrap"/>
     </Border>
   </Grid>
 </Window>
