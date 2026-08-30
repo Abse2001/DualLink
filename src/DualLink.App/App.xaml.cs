@@ -2,7 +2,7 @@ using System.Windows;
 
 namespace DualLink.App;
 
-public partial class App : Application
+public partial class App : System.Windows.Application
 {
     private System.Windows.Forms.NotifyIcon? _tray;
     private MainWindow? _window;
