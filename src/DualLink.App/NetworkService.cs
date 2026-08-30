@@ -21,14 +21,24 @@ public sealed class NetworkService
         {
             var props = n.GetIPProperties();
             var ipv4 = props.UnicastAddresses.FirstOrDefault(x => x.Address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork && !IPAddress.IsLoopback(x.Address));
+            var gateway = props.GatewayAddresses
+                .Select(x => x.Address)
+                .FirstOrDefault(x => x.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork && !x.Equals(IPAddress.Any));
             return new AdapterInfo(n.Id, n.Name, n.Description, n.NetworkInterfaceType, n.OperationalStatus,
-                props.GetIPv4Properties()?.Index ?? -1, ipv4?.Address, null);
+                props.GetIPv4Properties()?.Index ?? -1, ipv4?.Address, gateway, null);
         })
         .Where(x => x.InterfaceIndex >= 0 && x.Address is not null)
         .ToList();
 
-    public async Task<ProbeResult> ProbeAsync(AdapterInfo adapter, string host, CancellationToken token)
+    public async Task<ProbeResult> ProbeAsync(AdapterInfo adapter, string host, bool tunnelActive, CancellationToken token)
     {
+        // Proton's kill switch intentionally blocks packets that are bound directly to a
+        // physical adapter. While the tunnel is active, probe only the adapter's local
+        // gateway. This detects cable/router/hotspot loss without bypassing the VPN.
+        var target = tunnelActive ? adapter.Gateway?.ToString() : host;
+        if (string.IsNullOrWhiteSpace(target))
+            return new(adapter.Id, DateTimeOffset.Now, false, 0, 0, 100, 0, "No IPv4 gateway was found");
+
         var samples = new List<double>();
         var failures = 0;
         string? error = null;
@@ -36,7 +46,7 @@ public sealed class NetworkService
         {
             try
             {
-                var result = await RunAsync("ping.exe", $"-4 -n 1 -w 1200 -S {adapter.Address} {host}", token);
+                var result = await RunAsync("ping.exe", $"-4 -n 1 -w 1200 -S {adapter.Address} {target}", token);
                 var match = Regex.Match(result, @"time[=<](\d+)ms", RegexOptions.IgnoreCase);
                 if (match.Success) samples.Add(double.Parse(match.Groups[1].Value)); else failures++;
             }
