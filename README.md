@@ -6,10 +6,11 @@ DualLink is a free, native Windows 11 utility that monitors Ethernet and Wi-Fi i
 
 - Detects active Ethernet and Wi-Fi adapters.
 - Lets the user explicitly prefer Ethernet or Wi-Fi, with automatic backup.
-- Detects an active Proton/WireGuard adapter and warns before GTA can leak onto a different public IP.
+- Prepares a Proton WireGuard configuration for dual-path routing without reading, logging, or uploading its private key.
+- Pins the WireGuard server endpoint outside the full tunnel through both Ethernet and Wi-Fi.
 - Uses a high-contrast interface designed to remain readable on Windows display themes.
 - Probes through each adapter's own IPv4 address.
-- Uses protected local-gateway monitoring while Proton is connected, because a VPN kill switch correctly blocks direct internet probes from physical adapters.
+- Uses a dedicated public ICMP health target per physical adapter while WireGuard is connected, detecting upstream ISP and cellular-call interruptions in about one second.
 - Scores quality using ping, jitter, and packet loss.
 - Fails over immediately when the preferred link goes offline.
 - Requires repeated wins before switching for quality, preventing route flapping.
@@ -21,7 +22,16 @@ DualLink is a free, native Windows 11 utility that monitors Ethernet and Wi-Fi i
 
 DualLink provides failover and route optimization. It cannot merge one TCP/UDP flow or preserve the same public IP across two ISPs without a remote bonding endpoint. Separate applications and connections can still use Windows networking independently, but a single game session remains on one route.
 
-While Proton is active, the displayed latency, jitter, and loss measure reachability to each adapter's local gateway rather than end-to-end internet quality. This safely detects cable, router, and hotspot loss without bypassing Proton. An upstream ISP failure where the local gateway remains reachable may only be detected when Proton reports a tunnel failure.
+## Dual-path Proton setup
+
+1. Download a fresh fixed-server WireGuard `.conf` from Proton and keep it private.
+2. With WireGuard deactivated, click **Prepare Proton config** in DualLink and select that file.
+3. DualLink writes a sibling `-DualLink.conf`, replaces the Windows `/0` kill-switch routes with equivalent `/1` full-tunnel routes, pins the resolved Proton endpoint through both physical gateways, and stores only the public endpoint IP for future launches.
+4. Import the generated `-DualLink.conf` into the official WireGuard app and activate it while Ethernet and Wi-Fi are connected.
+
+The private and public WireGuard keys remain only in the local configuration files. DualLink never logs or transmits them. Health monitoring sends two small ICMP probes per physical link outside the VPN each second; application and GTA traffic remain routed through WireGuard.
+
+This mode uses WireGuard endpoint roaming and fast route changes to minimize interruption. It is experimental and cannot mathematically guarantee that every game session survives every outage.
 
 ## Install
 
