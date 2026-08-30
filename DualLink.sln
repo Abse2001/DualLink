@@ -1,0 +1,30 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DualLink.Core", "src\DualLink.Core\DualLink.Core.csproj", "{A2D19698-2051-41C7-A6AD-9F37F836E220}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DualLink.App", "src\DualLink.App\DualLink.App.csproj", "{49593F5E-A20D-4281-B256-056A82CF1D87}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DualLink.Tests", "tests\DualLink.Tests\DualLink.Tests.csproj", "{BE3C6E7D-F994-4265-975E-5699748FE44D}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{A2D19698-2051-41C7-A6AD-9F37F836E220}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A2D19698-2051-41C7-A6AD-9F37F836E220}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A2D19698-2051-41C7-A6AD-9F37F836E220}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A2D19698-2051-41C7-A6AD-9F37F836E220}.Release|Any CPU.Build.0 = Release|Any CPU
+		{49593F5E-A20D-4281-B256-056A82CF1D87}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{49593F5E-A20D-4281-B256-056A82CF1D87}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{49593F5E-A20D-4281-B256-056A82CF1D87}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{49593F5E-A20D-4281-B256-056A82CF1D87}.Release|Any CPU.Build.0 = Release|Any CPU
+		{BE3C6E7D-F994-4265-975E-5699748FE44D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{BE3C6E7D-F994-4265-975E-5699748FE44D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{BE3C6E7D-F994-4265-975E-5699748FE44D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{BE3C6E7D-F994-4265-975E-5699748FE44D}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal
