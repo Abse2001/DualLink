@@ -9,6 +9,7 @@ DualLink is a free, native Windows 11 utility that monitors Ethernet and Wi-Fi i
 - Detects an active Proton/WireGuard adapter and warns before GTA can leak onto a different public IP.
 - Uses a high-contrast interface designed to remain readable on Windows display themes.
 - Probes through each adapter's own IPv4 address.
+- Uses protected local-gateway monitoring while Proton is connected, because a VPN kill switch correctly blocks direct internet probes from physical adapters.
 - Scores quality using ping, jitter, and packet loss.
 - Fails over immediately when the preferred link goes offline.
 - Requires repeated wins before switching for quality, preventing route flapping.
@@ -19,6 +20,8 @@ DualLink is a free, native Windows 11 utility that monitors Ethernet and Wi-Fi i
 ## Honest limitation
 
 DualLink provides failover and route optimization. It cannot merge one TCP/UDP flow or preserve the same public IP across two ISPs without a remote bonding endpoint. Separate applications and connections can still use Windows networking independently, but a single game session remains on one route.
+
+While Proton is active, the displayed latency, jitter, and loss measure reachability to each adapter's local gateway rather than end-to-end internet quality. This safely detects cable, router, and hotspot loss without bypassing Proton. An upstream ISP failure where the local gateway remains reachable may only be detected when Proton reports a tunnel failure.
 
 ## Install
 
