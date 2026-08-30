@@ -11,6 +11,7 @@ public sealed record AdapterInfo(
     OperationalStatus Status,
     int InterfaceIndex,
     IPAddress? Address,
+    IPAddress? Gateway,
     int? OriginalMetric);
 
 public sealed record ProbeResult(
