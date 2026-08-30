@@ -8,6 +8,8 @@ namespace DualLink.App;
 
 public sealed class NetworkService
 {
+    private static readonly string[] ProbeTargets = ["1.1.1.1", "8.8.8.8"];
+
     public bool IsProtonTunnelActive() => NetworkInterface.GetAllNetworkInterfaces().Any(n =>
         n.OperationalStatus == OperationalStatus.Up &&
         ($"{n.Name} {n.Description}".Contains("Proton", StringComparison.OrdinalIgnoreCase) ||
@@ -32,21 +34,30 @@ public sealed class NetworkService
 
     public async Task<ProbeResult> ProbeAsync(AdapterInfo adapter, string host, bool tunnelActive, CancellationToken token)
     {
-        // Proton's kill switch intentionally blocks packets that are bound directly to a
-        // physical adapter. While the tunnel is active, probe only the adapter's local
-        // gateway. This detects cable/router/hotspot loss without bypassing the VPN.
-        var target = tunnelActive ? adapter.Gateway?.ToString() : host;
+        // A prepared WireGuard config uses /1 routes instead of the Windows /0 kill
+        // switch. A single public ICMP target is pinned to each physical adapter so
+        // upstream loss (including a cellular call) is detected without routing game
+        // traffic outside the tunnel.
+        var target = tunnelActive ? ProbeTargets[(adapter.InterfaceIndex & int.MaxValue) % ProbeTargets.Length] : host;
         if (string.IsNullOrWhiteSpace(target))
             return new(adapter.Id, DateTimeOffset.Now, false, 0, 0, 100, 0, "No IPv4 gateway was found");
+
+        if (tunnelActive)
+        {
+            if (adapter.Gateway is null)
+                return new(adapter.Id, DateTimeOffset.Now, false, 0, 0, 100, 0, "No IPv4 gateway was found");
+            await EnsureHostRouteAsync(target, adapter, 5);
+        }
 
         var samples = new List<double>();
         var failures = 0;
         string? error = null;
-        for (var i = 0; i < 4; i++)
+        const int sampleCount = 2;
+        for (var i = 0; i < sampleCount; i++)
         {
             try
             {
-                var result = await RunAsync("ping.exe", $"-4 -n 1 -w 1200 -S {adapter.Address} {target}", token);
+                var result = await RunAsync("ping.exe", $"-4 -n 1 -w 350 -S {adapter.Address} {target}", token);
                 var match = Regex.Match(result, @"time[=<](\d+)ms", RegexOptions.IgnoreCase);
                 if (match.Success) samples.Add(double.Parse(match.Groups[1].Value)); else failures++;
             }
@@ -55,7 +66,7 @@ public sealed class NetworkService
         var online = samples.Count > 0;
         var latency = online ? samples.Average() : 0;
         var jitter = samples.Count > 1 ? samples.Zip(samples.Skip(1), (a, b) => Math.Abs(a - b)).Average() : 0;
-        var loss = failures / 4d * 100;
+        var loss = failures / (double)sampleCount * 100;
         return new(adapter.Id, DateTimeOffset.Now, online, latency, jitter, loss, LinkScorer.Calculate(online, latency, jitter, loss), error);
     }
 
@@ -68,8 +79,35 @@ public sealed class NetworkService
         }
     }
 
+    public async Task ApplyWireGuardEndpointRoutesAsync(IEnumerable<AdapterInfo> adapters, IPAddress endpoint, string? preferredId)
+    {
+        foreach (var adapter in adapters.Where(x => x.Gateway is not null))
+        {
+            var metric = adapter.Id == preferredId ? 1 : 50;
+            await EnsureHostRouteAsync(endpoint.ToString(), adapter, metric);
+        }
+    }
+
+    private static async Task EnsureHostRouteAsync(string destination, AdapterInfo adapter, int metric)
+    {
+        if (adapter.Gateway is null) return;
+        var prefix = $"{destination}/32";
+        var command = $"Remove-NetRoute -DestinationPrefix '{prefix}' -InterfaceIndex {adapter.InterfaceIndex} -AddressFamily IPv4 -Confirm:$false -ErrorAction SilentlyContinue; " +
+                      $"New-NetRoute -DestinationPrefix '{prefix}' -InterfaceIndex {adapter.InterfaceIndex} -NextHop '{adapter.Gateway}' -RouteMetric {metric} -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Out-Null";
+        await RunPowerShellAsync(command);
+    }
+
     public async Task RestoreAutomaticMetricsAsync() =>
         await RunPowerShellAsync("Get-NetIPInterface -AddressFamily IPv4 | Where-Object {$_.InterfaceAlias -notmatch 'Loopback'} | Set-NetIPInterface -AutomaticMetric Enabled");
+
+    public async Task RestoreManagedRoutesAsync(IEnumerable<AdapterInfo> adapters, IPAddress? endpoint)
+    {
+        var prefixes = ProbeTargets.Select(x => $"'{x}/32'").ToList();
+        if (endpoint is not null) prefixes.Add($"'{endpoint}/32'");
+        foreach (var adapter in adapters)
+            await RunPowerShellAsync($"Remove-NetRoute -DestinationPrefix @({string.Join(',', prefixes)}) -InterfaceIndex {adapter.InterfaceIndex} -AddressFamily IPv4 -Confirm:$false -ErrorAction SilentlyContinue");
+        await RestoreAutomaticMetricsAsync();
+    }
 
     private static Task<string> RunPowerShellAsync(string command) => RunAsync("powershell.exe", $"-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"{command}\"", CancellationToken.None);
 
