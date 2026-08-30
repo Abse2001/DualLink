@@ -8,6 +8,12 @@ namespace DualLink.App;
 
 public sealed class NetworkService
 {
+    public bool IsProtonTunnelActive() => NetworkInterface.GetAllNetworkInterfaces().Any(n =>
+        n.OperationalStatus == OperationalStatus.Up &&
+        ($"{n.Name} {n.Description}".Contains("Proton", StringComparison.OrdinalIgnoreCase) ||
+         $"{n.Name} {n.Description}".Contains("WireGuard", StringComparison.OrdinalIgnoreCase) ||
+         $"{n.Name} {n.Description}".Contains("Wintun", StringComparison.OrdinalIgnoreCase)));
+
     public IReadOnlyList<AdapterInfo> GetInternetAdapters() => NetworkInterface.GetAllNetworkInterfaces()
         .Where(n => n.OperationalStatus == OperationalStatus.Up)
         .Where(n => n.NetworkInterfaceType is NetworkInterfaceType.Ethernet or NetworkInterfaceType.Wireless80211)

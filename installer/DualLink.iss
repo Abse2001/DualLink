@@ -1,5 +1,5 @@
 #define MyAppName "DualLink"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.1.0"
 #define MyAppPublisher "Abse2001"
 #define MyAppExeName "DualLink.exe"
 
@@ -11,6 +11,13 @@ AppPublisher={#MyAppPublisher}
 DefaultDirName={autopf}\DualLink
 DefaultGroupName=DualLink
 PrivilegesRequired=admin
+UsePreviousAppDir=yes
+UsePreviousGroup=yes
+CloseApplications=force
+RestartApplications=no
+CloseApplicationsFilter=DualLink.exe
+CreateUninstallRegKey=yes
+Uninstallable=yes
 OutputDir=..\artifacts
 OutputBaseFilename=DualLink-Setup-x64
 Compression=lzma2

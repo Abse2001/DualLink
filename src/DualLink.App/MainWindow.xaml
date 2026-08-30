@@ -1,14 +1,34 @@
-<Window x:Class="DualLink.App.MainWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Title="DualLink" Width="940" Height="660" MinWidth="760" MinHeight="520" Background="{StaticResource BackgroundBrush}" Foreground="#E5E7EB" WindowStartupLocation="CenterScreen">
+<Window x:Class="DualLink.App.MainWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Title="DualLink" Width="1040" Height="720" MinWidth="860" MinHeight="580" Background="#08111F" Foreground="#F8FAFC" WindowStartupLocation="CenterScreen">
+  <Window.Resources>
+    <Style TargetType="TextBlock"><Setter Property="Foreground" Value="#F8FAFC"/></Style>
+    <Style TargetType="CheckBox"><Setter Property="Foreground" Value="#F8FAFC"/><Setter Property="VerticalAlignment" Value="Center"/></Style>
+    <Style TargetType="ComboBox"><Setter Property="Background" Value="#FFFFFF"/><Setter Property="Foreground" Value="#0F172A"/><Setter Property="Padding" Value="8,5"/><Setter Property="MinWidth" Value="190"/></Style>
+    <Style TargetType="DataGridColumnHeader"><Setter Property="Background" Value="#1E293B"/><Setter Property="Foreground" Value="#FFFFFF"/><Setter Property="FontWeight" Value="Bold"/><Setter Property="Padding" Value="10"/><Setter Property="BorderBrush" Value="#475569"/></Style>
+    <Style TargetType="DataGridCell"><Setter Property="Foreground" Value="#FFFFFF"/><Setter Property="BorderBrush" Value="#334155"/><Setter Property="Padding" Value="8"/></Style>
+    <Style TargetType="DataGridRow"><Setter Property="Foreground" Value="#FFFFFF"/><Setter Property="Background" Value="#111C2E"/><Setter Property="BorderBrush" Value="#334155"/><Style.Triggers><Trigger Property="AlternationIndex" Value="1"><Setter Property="Background" Value="#17243A"/></Trigger><Trigger Property="IsSelected" Value="True"><Setter Property="Background" Value="#075985"/><Setter Property="Foreground" Value="#FFFFFF"/></Trigger></Style.Triggers></Style>
+  </Window.Resources>
   <Grid Margin="22">
-    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-    <DockPanel Grid.Row="0" Margin="0,0,0,18">
-      <StackPanel DockPanel.Dock="Left"><TextBlock FontSize="30" FontWeight="Bold" Text="DualLink"/><TextBlock Foreground="#94A3B8" Text="Automatic Ethernet + Wi-Fi failover and quality routing"/></StackPanel>
-      <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right"><CheckBox x:Name="AutoCheck" Content="Auto optimize" IsChecked="True" VerticalAlignment="Center" Margin="10"/><Button Content="Probe now" Click="ProbeNow_Click"/><Button Content="Restore Windows defaults" Click="Restore_Click"/></StackPanel>
+    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+    <DockPanel Grid.Row="0" Margin="0,0,0,16">
+      <StackPanel DockPanel.Dock="Left"><TextBlock FontSize="32" FontWeight="Bold" Text="DualLink"/><TextBlock Foreground="#CBD5E1" FontSize="14" Text="Reliable Ethernet + hotspot failover for Windows 11"/></StackPanel>
+      <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right"><Button Content="Probe now" Click="ProbeNow_Click"/><Button Content="Restore Windows defaults" Click="Restore_Click"/></StackPanel>
     </DockPanel>
-    <Border Grid.Row="1" Background="{StaticResource CardBrush}" CornerRadius="10" Padding="14" Margin="0,0,0,14">
-      <DockPanel><Ellipse x:Name="StatusDot" Width="12" Height="12" Fill="#F59E0B" Margin="0,0,10,0"/><TextBlock x:Name="StatusText" FontSize="15" Text="Starting network monitor…"/><TextBlock x:Name="ActiveText" DockPanel.Dock="Right" HorizontalAlignment="Right" Foreground="{StaticResource AccentBrush}" FontWeight="SemiBold"/></DockPanel>
+    <Border Grid.Row="1" Background="#132238" BorderBrush="#334155" BorderThickness="1" CornerRadius="10" Padding="14" Margin="0,0,0,12">
+      <WrapPanel VerticalAlignment="Center">
+        <TextBlock FontWeight="Bold" Margin="0,7,8,0" Text="Preferred connection:"/>
+        <ComboBox x:Name="PreferredCombo" DisplayMemberPath="DisplayName" SelectionChanged="PreferredCombo_SelectionChanged" Margin="0,0,22,0"/>
+        <CheckBox x:Name="AutoCheck" Content="Manage routes automatically" IsChecked="True" Margin="0,0,22,0"/>
+        <CheckBox x:Name="ProtonModeCheck" Content="Proton-safe gaming mode" IsChecked="True"/>
+      </WrapPanel>
     </Border>
-    <DataGrid Grid.Row="2" x:Name="AdapterGrid" AutoGenerateColumns="False" IsReadOnly="True" CanUserAddRows="False" Background="{StaticResource CardBrush}" Foreground="#E5E7EB" RowBackground="#141E30" AlternatingRowBackground="#18253A" GridLinesVisibility="Horizontal" HeadersVisibility="Column" BorderThickness="0">
+    <Border Grid.Row="2" Background="#132238" BorderBrush="#334155" BorderThickness="1" CornerRadius="10" Padding="14" Margin="0,0,0,14">
+      <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+        <Ellipse x:Name="StatusDot" Grid.Column="0" Width="13" Height="13" Fill="#F59E0B" Margin="0,2,10,0" VerticalAlignment="Top"/>
+        <StackPanel Grid.Column="1"><TextBlock x:Name="StatusText" FontSize="15" FontWeight="SemiBold" Text="Starting network monitor…" TextWrapping="Wrap"/><TextBlock x:Name="VpnText" Margin="0,4,0,0" Foreground="#FDE68A" FontSize="13" TextWrapping="Wrap"/></StackPanel>
+        <TextBlock x:Name="ActiveText" Grid.Column="2" Margin="14,0,0,0" Foreground="#7DD3FC" FontWeight="Bold" FontSize="15"/>
+      </Grid>
+    </Border>
+    <DataGrid Grid.Row="3" x:Name="AdapterGrid" AutoGenerateColumns="False" IsReadOnly="True" CanUserAddRows="False" AlternationCount="2" Background="#111C2E" Foreground="#FFFFFF" GridLinesVisibility="Horizontal" HeadersVisibility="Column" BorderBrush="#334155" BorderThickness="1" SelectionUnit="FullRow">
       <DataGrid.Columns>
         <DataGridTextColumn Header="Connection" Binding="{Binding Name}" Width="2*"/>
         <DataGridTextColumn Header="Type" Binding="{Binding Type}" Width="*"/>
@@ -20,6 +40,8 @@
         <DataGridTextColumn Header="Role" Binding="{Binding Role}" Width="*"/>
       </DataGrid.Columns>
     </DataGrid>
-    <TextBlock Grid.Row="3" Margin="0,14,0,0" Foreground="#94A3B8" Text="DualLink changes only Windows interface metrics. It does not create a VPN, intercept traffic, or combine one game connection across two ISPs." TextWrapping="Wrap"/>
+    <Border Grid.Row="4" Margin="0,14,0,0" Padding="12" Background="#3B2A12" BorderBrush="#A16207" BorderThickness="1" CornerRadius="8">
+      <TextBlock Foreground="#FEF3C7" Text="For GTA: connect Proton to one fixed server before launching the game. DualLink keeps Proton on the preferred physical connection and fails over underneath it. A short packet-loss burst is still possible during handover." TextWrapping="Wrap"/>
+    </Border>
   </Grid>
 </Window>

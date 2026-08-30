@@ -5,6 +5,9 @@ DualLink is a free, native Windows 11 utility that monitors Ethernet and Wi-Fi i
 ## What it does
 
 - Detects active Ethernet and Wi-Fi adapters.
+- Lets the user explicitly prefer Ethernet or Wi-Fi, with automatic backup.
+- Detects an active Proton/WireGuard adapter and warns before GTA can leak onto a different public IP.
+- Uses a high-contrast interface designed to remain readable on Windows display themes.
 - Probes through each adapter's own IPv4 address.
 - Scores quality using ping, jitter, and packet loss.
 - Fails over immediately when the preferred link goes offline.
@@ -20,6 +23,8 @@ DualLink provides failover and route optimization. It cannot merge one TCP/UDP f
 ## Install
 
 Download `DualLink-Setup-x64.exe` from the latest private repository release or Actions artifact. Windows asks for administrator permission because changing interface metrics requires it.
+
+To update, download and run the newer installer. Its stable application ID detects the existing installation, closes DualLink if it is running in the tray, and upgrades the same installation in place. Uninstalling the old version first is not required.
 
 ## Safety
 
