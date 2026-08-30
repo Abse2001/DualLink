@@ -43,7 +43,8 @@ public partial class MainWindow : Window
         {
             var adapters = _network.GetInternetAdapters();
             UpdateConnectionChoices(adapters);
-            var probes = await Task.WhenAll(adapters.Select(x => _network.ProbeAsync(x, _settings.ProbeHost, _stop.Token)));
+            var protonActive = ProtonModeCheck.IsChecked == true && _network.IsProtonTunnelActive();
+            var probes = await Task.WhenAll(adapters.Select(x => _network.ProbeAsync(x, _settings.ProbeHost, protonActive, _stop.Token)));
             var decision = ChooseConnection(probes);
             if (AutoCheck.IsChecked == true && decision.ActiveAdapterId is not null && decision.Changed)
             {
@@ -59,14 +60,15 @@ public partial class MainWindow : Window
             }
             ActiveText.Text = decision.ActiveAdapterId is null ? "" : $"Active: {adapters.FirstOrDefault(x => x.Id == decision.ActiveAdapterId)?.Name}";
             StatusText.Text = decision.Reason;
-            var protonActive = _network.IsProtonTunnelActive();
             VpnText.Text = ProtonModeCheck.IsChecked == true
                 ? protonActive
-                    ? "Proton tunnel detected. GTA should keep the VPN exit IP during physical-link failover."
+                    ? "Proton tunnel detected. Protected gateway monitoring is active; GTA traffic stays inside Proton."
                     : "Proton-safe mode is enabled, but no active Proton/WireGuard tunnel was detected. Connect Proton before opening GTA."
                 : "Proton-safe mode is off. Switching between router and hotspot will change GTA's public IP.";
             VpnText.Foreground = new SolidColorBrush(protonActive ? MediaColor.FromRgb(134, 239, 172) : MediaColor.FromRgb(253, 230, 138));
             StatusDot.Fill = new SolidColorBrush(probes.Any(x => x.Online) ? MediaColor.FromRgb(34, 197, 94) : MediaColor.FromRgb(239, 68, 68));
+            if (protonActive && probes.Any(x => x.Online))
+                StatusText.Text = $"{decision.Reason} — measuring gateway latency while Proton is connected";
             AppLog.Write(decision.Reason);
         }
         catch (Exception ex)
