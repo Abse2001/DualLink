@@ -12,18 +12,22 @@ public partial class MainWindow : Window
     private readonly ObservableCollection<AdapterRow> _rows = [];
     private readonly DualLinkSettings _settings = new();
     private readonly NetworkService _network = new();
+    private readonly WireGuardConfigService _wireGuardConfig = new();
     private readonly CancellationTokenSource _stop = new();
     private FailoverController _controller;
     private string? _selectedPreferenceId;
     private string? _lastAppliedId;
     private int _preferredRecoveryWins;
     private bool _updatingChoices;
+    private System.Net.IPAddress? _wireGuardEndpoint;
+    private string? _endpointRouteSignature;
 
     public MainWindow()
     {
         InitializeComponent();
         AdapterGrid.ItemsSource = _rows;
         _controller = new FailoverController(_settings);
+        _wireGuardEndpoint = _wireGuardConfig.LoadEndpoint();
         Loaded += async (_, _) => await MonitorLoop();
     }
 
@@ -44,11 +48,14 @@ public partial class MainWindow : Window
             var adapters = _network.GetInternetAdapters();
             UpdateConnectionChoices(adapters);
             var protonActive = ProtonModeCheck.IsChecked == true && _network.IsProtonTunnelActive();
+            var routePreference = _lastAppliedId ?? _selectedPreferenceId ?? adapters.FirstOrDefault(x => x.Type == System.Net.NetworkInformation.NetworkInterfaceType.Ethernet)?.Id;
+            await EnsureEndpointRoutesAsync(adapters, routePreference);
             var probes = await Task.WhenAll(adapters.Select(x => _network.ProbeAsync(x, _settings.ProbeHost, protonActive, _stop.Token)));
             var decision = ChooseConnection(probes);
             if (AutoCheck.IsChecked == true && decision.ActiveAdapterId is not null && decision.Changed)
             {
                 await _network.ApplyMetricsAsync(adapters, decision.ActiveAdapterId, _settings.PreferredMetric, _settings.BackupMetric);
+                await EnsureEndpointRoutesAsync(adapters, decision.ActiveAdapterId, force: true);
                 _lastAppliedId = decision.ActiveAdapterId;
             }
 
@@ -62,13 +69,15 @@ public partial class MainWindow : Window
             StatusText.Text = decision.Reason;
             VpnText.Text = ProtonModeCheck.IsChecked == true
                 ? protonActive
-                    ? "Proton tunnel detected. Protected gateway monitoring is active; GTA traffic stays inside Proton."
+                    ? _wireGuardEndpoint is not null
+                        ? "WireGuard tunnel detected. Dual-path endpoint routing and protected internet probes are active."
+                        : "WireGuard detected, but no prepared Proton config is registered. Deactivate it and use Prepare Proton config."
                     : "Proton-safe mode is enabled, but no active Proton/WireGuard tunnel was detected. Connect Proton before opening GTA."
                 : "Proton-safe mode is off. Switching between router and hotspot will change GTA's public IP.";
             VpnText.Foreground = new SolidColorBrush(protonActive ? MediaColor.FromRgb(134, 239, 172) : MediaColor.FromRgb(253, 230, 138));
             StatusDot.Fill = new SolidColorBrush(probes.Any(x => x.Online) ? MediaColor.FromRgb(34, 197, 94) : MediaColor.FromRgb(239, 68, 68));
             if (protonActive && probes.Any(x => x.Online))
-                StatusText.Text = $"{decision.Reason} — measuring gateway latency while Proton is connected";
+                StatusText.Text = $"{decision.Reason} — measuring each physical internet path while WireGuard is connected";
             AppLog.Write(decision.Reason);
         }
         catch (Exception ex)
@@ -132,10 +141,40 @@ public partial class MainWindow : Window
     }
 
     private async void ProbeNow_Click(object sender, RoutedEventArgs e) => await RefreshAsync();
+    private async void PrepareWireGuard_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var dialog = new Microsoft.Win32.OpenFileDialog { Filter = "WireGuard configuration (*.conf)|*.conf", Title = "Select a newly downloaded Proton WireGuard configuration" };
+            if (dialog.ShowDialog(this) != true) return;
+            var prepared = await _wireGuardConfig.PrepareAsync(dialog.FileName);
+            _wireGuardEndpoint = prepared.Endpoint;
+            var adapters = _network.GetInternetAdapters();
+            var preferred = _selectedPreferenceId ?? adapters.FirstOrDefault(x => x.Type == System.Net.NetworkInformation.NetworkInterfaceType.Ethernet)?.Id;
+            await EnsureEndpointRoutesAsync(adapters, preferred, force: true);
+            System.Windows.MessageBox.Show(this, $"Prepared safely for DualLink:\n\n{prepared.Path}\n\nImport this generated file into WireGuard. Do not import the original file. Keep both Ethernet and Wi-Fi connected before activating it.", "DualLink Proton configuration", MessageBoxButton.OK, MessageBoxImage.Information);
+            StatusText.Text = "Proton endpoint routes prepared; import the generated -DualLink.conf file into WireGuard";
+        }
+        catch (Exception ex)
+        {
+            System.Windows.MessageBox.Show(this, ex.Message, "Unable to prepare WireGuard configuration", MessageBoxButton.OK, MessageBoxImage.Error);
+            AppLog.Write($"WireGuard preparation failed: {ex.Message}");
+        }
+    }
+
+    private async Task EnsureEndpointRoutesAsync(IReadOnlyList<AdapterInfo> adapters, string? preferredId, bool force = false)
+    {
+        if (_wireGuardEndpoint is null) return;
+        var signature = $"{_wireGuardEndpoint}|{preferredId}|{string.Join(',', adapters.Select(x => x.Id).Order())}";
+        if (!force && signature == _endpointRouteSignature) return;
+        await _network.ApplyWireGuardEndpointRoutesAsync(adapters, _wireGuardEndpoint, preferredId);
+        _endpointRouteSignature = signature;
+    }
     private async void Restore_Click(object sender, RoutedEventArgs e)
     {
         AutoCheck.IsChecked = false;
-        await _network.RestoreAutomaticMetricsAsync();
+        await _network.RestoreManagedRoutesAsync(_network.GetInternetAdapters(), _wireGuardEndpoint);
+        _endpointRouteSignature = null;
         _controller = new FailoverController(_settings);
         StatusText.Text = "Windows automatic metrics restored";
     }
