@@ -29,6 +29,7 @@
           <ComboBox x:Name="BondingModeCombo" Width="130" Margin="0,0,10,0">
             <ComboBoxItem Content="Bonding" IsSelected="True"/><ComboBoxItem Content="Failover"/><ComboBoxItem Content="Redundant"/>
           </ComboBox>
+          <Button x:Name="ServerSetupButton" Content="Setup server" Click="SetupServer_Click" Padding="14,6" Margin="0,0,8,0"/>
           <Button x:Name="BondingToggleButton" Content="Start bonding" Click="BondingToggle_Click" Padding="14,6"/>
         </WrapPanel>
       </StackPanel>
