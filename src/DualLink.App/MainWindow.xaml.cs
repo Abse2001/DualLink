@@ -139,7 +139,7 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             if (_bonding is not null) await StopBondingAsync();
-            MessageBox.Show(this, ex.Message, "Unable to start bonding", MessageBoxButton.OK, MessageBoxImage.Error);
+            System.Windows.MessageBox.Show(this, ex.Message, "Unable to start bonding", MessageBoxButton.OK, MessageBoxImage.Error);
             AppLog.Write($"Bonding start failed: {ex}");
         }
     }
