@@ -123,9 +123,9 @@ public partial class MainWindow : Window
             if (key.Length < 32) throw new InvalidOperationException("The relay key must contain 32 bytes.");
 
             var adapters = _network.GetInternetAdapters().Where(x => x.Address is not null && x.Gateway is not null).ToArray();
-            if (adapters.Length < 2) throw new InvalidOperationException("Connect both Ethernet and the phone hotspot before starting bonding.");
+            if (adapters.Length < 2) throw new InvalidOperationException("Connect at least two Internet adapters: Ethernet, Wi-Fi hotspot, or USB tethering.");
             await _network.ApplyBondingEndpointRoutesAsync(adapters, relay);
-            var paths = adapters.Take(2).Select((adapter, index) => new BondingPathConfig(
+            var paths = adapters.Select((adapter, index) => new BondingPathConfig(
                 (byte)(index + 1), adapter.Name, adapter.Address!, adapter.InterfaceIndex));
             _bonding = new BondingEngine(paths, relay, 443, key, () => _bondingSamples);
             await _network.ConfigureBondingTunnelAsync();
@@ -193,7 +193,7 @@ public partial class MainWindow : Window
     private void UpdateConnectionChoices(IReadOnlyList<AdapterInfo> adapters)
     {
         var choices = new List<AdapterChoice> { new(null, "Automatic — best quality") };
-        choices.AddRange(adapters.Select(x => new AdapterChoice(x.Id, $"Prefer {x.Name} ({FriendlyType(x.Type)})")));
+        choices.AddRange(adapters.Select(x => new AdapterChoice(x.Id, $"Prefer {x.Name} ({FriendlyType(x)})")));
         var existingIds = PreferredCombo.Items.Cast<AdapterChoice>().Select(x => x.Id).ToList();
         if (existingIds.SequenceEqual(choices.Select(x => x.Id))) return;
         _updatingChoices = true;
@@ -202,8 +202,15 @@ public partial class MainWindow : Window
         _updatingChoices = false;
     }
 
-    private static string FriendlyType(System.Net.NetworkInformation.NetworkInterfaceType type) =>
-        type == System.Net.NetworkInformation.NetworkInterfaceType.Wireless80211 ? "Wi-Fi" : "Ethernet";
+    private static string FriendlyType(AdapterInfo adapter)
+    {
+        var identity = $"{adapter.Name} {adapter.Description}";
+        if (identity.Contains("USB", StringComparison.OrdinalIgnoreCase) ||
+            identity.Contains("RNDIS", StringComparison.OrdinalIgnoreCase) ||
+            identity.Contains("iPhone", StringComparison.OrdinalIgnoreCase) ||
+            identity.Contains("Apple Mobile", StringComparison.OrdinalIgnoreCase)) return "USB tethering";
+        return adapter.Type == System.Net.NetworkInformation.NetworkInterfaceType.Wireless80211 ? "Wi-Fi" : "Ethernet";
+    }
 
     private void PreferredCombo_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
     {
@@ -264,10 +271,17 @@ public partial class MainWindow : Window
 public sealed record AdapterRow(string Name, string Type, string Address, string Latency, string Jitter, string Loss, string Score, string Role)
 {
     public static AdapterRow From(AdapterInfo adapter, ProbeResult probe, bool active) => new(
-        adapter.Name, adapter.Type.ToString(), adapter.Address?.ToString() ?? "—",
+        adapter.Name, FriendlyType(adapter), adapter.Address?.ToString() ?? "—",
         probe.Online ? $"{probe.LatencyMs:0} ms" : "Offline",
         probe.Online ? $"{probe.JitterMs:0} ms" : "—",
         $"{probe.PacketLossPercent:0}%", $"{probe.Score:0}", active ? "Preferred" : "Backup");
+
+    private static string FriendlyType(AdapterInfo adapter)
+    {
+        var identity = $"{adapter.Name} {adapter.Description}";
+        if (identity.Contains("USB", StringComparison.OrdinalIgnoreCase) || identity.Contains("RNDIS", StringComparison.OrdinalIgnoreCase) || identity.Contains("iPhone", StringComparison.OrdinalIgnoreCase)) return "USB tethering";
+        return adapter.Type == System.Net.NetworkInformation.NetworkInterfaceType.Wireless80211 ? "Wi-Fi" : "Ethernet";
+    }
 }
 
 public sealed record AdapterChoice(string? Id, string DisplayName);
