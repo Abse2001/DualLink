@@ -53,8 +53,12 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force publish/relay | Out-Null
           dotnet publish src/DualLink.Relay/DualLink.Relay.csproj -c Release -r linux-x64 --self-contained true -p:PublishSingleFile=true -o publish/relay
-          Copy-Item deploy/linux/install-relay.sh publish/relay/
-          Copy-Item deploy/linux/duallink-relay.service publish/relay/
+          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+          foreach ($file in @('install-relay.sh', 'duallink-relay.service')) {
+            $content = [IO.File]::ReadAllText("deploy/linux/$file").Replace("`r`n", "`n")
+            [IO.File]::WriteAllText("publish/relay/$file", $content, $utf8NoBom)
+          }
+          if ([IO.File]::ReadAllText('publish/relay/install-relay.sh').Contains("`r")) { throw 'Linux installer contains CRLF' }
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y
       - name: Build installer
