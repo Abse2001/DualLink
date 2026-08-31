@@ -74,3 +74,31 @@ public static class BondingPacketCodec
         if (key.Length < 32) throw new ArgumentException("The bonding key must contain at least 32 bytes.", nameof(key));
     }
 }
+
+public sealed class ReplayWindow(int windowSize = 4096)
+{
+    private readonly HashSet<ulong> _seen = [];
+    private ulong _highest;
+    private bool _initialized;
+
+    public bool TryAccept(ulong sequence)
+    {
+        if (!_initialized)
+        {
+            _initialized = true;
+            _highest = sequence;
+            _seen.Add(sequence);
+            return true;
+        }
+
+        if (sequence > _highest)
+        {
+            _highest = sequence;
+            _seen.RemoveWhere(value => _highest - value >= (ulong)windowSize);
+            return _seen.Add(sequence);
+        }
+
+        if (_highest - sequence >= (ulong)windowSize) return false;
+        return _seen.Add(sequence);
+    }
+}
