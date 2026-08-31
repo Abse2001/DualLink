@@ -22,7 +22,7 @@ The relay is a self-contained .NET 8 Linux service using `/dev/net/tun`, systemd
 2. Install DualLink 2 and press **Setup server**.
 3. Enter the VPS public IPv4 address and select its AWS `.pem` private key.
 4. DualLink uploads the bundled relay, creates a random 256-bit bonding key, starts the service, and stores the key encrypted with Windows DPAPI for the current user.
-5. Connect at least two Internet adapters and press **Start bonding**.
+5. Connect one or more Internet adapters and press **Start bonding**. With one adapter it operates as an encrypted tunnel; additional adapters are bonded automatically when they become available.
 
 The private SSH key is used only by the local Windows OpenSSH client. DualLink does not copy or store it.
 
