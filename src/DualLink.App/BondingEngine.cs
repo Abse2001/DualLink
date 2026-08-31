@@ -44,9 +44,11 @@ internal sealed class BondingEngine : IAsyncDisposable
         while (!_shutdown.IsCancellationRequested)
         {
             var packet = await _tun.ReceiveAsync(_shutdown.Token);
-            await _client.SendPacketAsync(packet, _samples(), Mode, _shutdown.Token);
+            await _client.SendPacketAsync(packet, _client.GetAdaptiveSamples(_samples()), Mode, _shutdown.Token);
         }
     }
+
+    public Task UpdatePathsAsync(IEnumerable<BondingPathConfig> paths) => _client.UpdatePathsAsync(paths);
 
     private async Task ProbeLoopAsync()
     {
