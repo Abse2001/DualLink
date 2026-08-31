@@ -174,6 +174,8 @@ public partial class MainWindow : Window
             var paths = adapters.Select((adapter, index) => new BondingPathConfig(
                 (byte)(index + 1), adapter.Name, adapter.Address!, adapter.InterfaceIndex));
             _bonding = new BondingEngine(paths, relay, 443, key, () => _bondingSamples);
+            StatusText.Text = "Testing encrypted relay connectivity on every physical path…";
+            await _bonding.ConnectAsync(TimeSpan.FromSeconds(6), _stop.Token);
             await _network.ConfigureBondingTunnelAsync();
             _bonding.Mode = SelectedBondingMode();
             _bonding.Start();
@@ -203,6 +205,8 @@ public partial class MainWindow : Window
         await _network.RemoveBondingRoutesAsync();
         if (_bonding is not null) await _bonding.DisposeAsync();
         _bonding = null;
+        if (IPAddress.TryParse(RelayAddressText.Text.Trim(), out var relay))
+            await _network.RemoveBondingEndpointRoutesAsync(_network.GetInternetAdapters(), relay);
         BondingToggleButton.Content = "Start bonding";
         StatusText.Text = "Bonding stopped; existing failover monitoring remains active";
         AppLog.Write("Bonding stopped");
