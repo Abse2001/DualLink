@@ -10,7 +10,7 @@
   <Grid Margin="22">
     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
     <DockPanel Grid.Row="0" Margin="0,0,0,16">
-      <StackPanel DockPanel.Dock="Left"><TextBlock FontSize="32" FontWeight="Bold" Text="DualLink"/><TextBlock Foreground="#CBD5E1" FontSize="14" Text="Bonded Ethernet + hotspot for Windows 11"/></StackPanel>
+      <StackPanel DockPanel.Dock="Left"><TextBlock FontSize="32" FontWeight="Bold" Text="DualLink"/><TextBlock Foreground="#CBD5E1" FontSize="14" Text="Bonded Ethernet + Wi-Fi + USB tethering for Windows 11"/></StackPanel>
       <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right"><Button Content="Prepare Proton config" Click="PrepareWireGuard_Click"/><Button Content="Probe now" Click="ProbeNow_Click"/><Button Content="Restore Windows defaults" Click="Restore_Click"/></StackPanel>
     </DockPanel>
     <Border Grid.Row="1" Background="#132238" BorderBrush="#334155" BorderThickness="1" CornerRadius="10" Padding="14" Margin="0,0,0,12">
@@ -53,7 +53,7 @@
       </DataGrid.Columns>
     </DataGrid>
     <Border Grid.Row="4" Margin="0,14,0,0" Padding="12" Background="#3B2A12" BorderBrush="#A16207" BorderThickness="1" CornerRadius="8">
-      <TextBlock Foreground="#FEF3C7" Text="Bonding mode sends traffic through the DualLink relay so games keep one public IP while Ethernet and hotspot contribute simultaneously. Existing Proton-safe failover remains available when bonding is stopped." TextWrapping="Wrap"/>
+      <TextBlock Foreground="#FEF3C7" Text="Bonding mode sends traffic through the DualLink relay so games keep one public IP while Ethernet, Wi-Fi hotspot, and USB tethering contribute simultaneously. Existing Proton-safe failover remains available when bonding is stopped." TextWrapping="Wrap"/>
     </Border>
   </Grid>
 </Window>
