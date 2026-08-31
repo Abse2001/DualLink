@@ -42,8 +42,12 @@ jobs:
       - name: Smoke-test Wintun adapter
         shell: pwsh
         run: |
-          & ./publish/DualLink.exe --wintun-smoke
-          if ($LASTEXITCODE -ne 0) { throw "Wintun smoke test failed with exit code $LASTEXITCODE" }
+          $process = Start-Process ./publish/DualLink.exe -ArgumentList '--wintun-smoke' -Wait -PassThru
+          if ($process.ExitCode -ne 0) {
+            $log = Join-Path $env:LOCALAPPDATA 'DualLink/duallink.log'
+            if (Test-Path $log) { Get-Content $log }
+            throw "Wintun smoke test failed with exit code $($process.ExitCode)"
+          }
       - name: Add bundled Linux relay
         shell: pwsh
         run: |
