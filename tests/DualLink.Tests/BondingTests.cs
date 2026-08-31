@@ -1,4 +1,5 @@
 using DualLink.Core;
+using Xunit;
 
 namespace DualLink.Tests;
 
