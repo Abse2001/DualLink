@@ -13,12 +13,12 @@ public sealed class NetworkService
     public bool IsProtonTunnelActive() => NetworkInterface.GetAllNetworkInterfaces().Any(n =>
         n.OperationalStatus == OperationalStatus.Up &&
         ($"{n.Name} {n.Description}".Contains("Proton", StringComparison.OrdinalIgnoreCase) ||
-         $"{n.Name} {n.Description}".Contains("WireGuard", StringComparison.OrdinalIgnoreCase) ||
-         $"{n.Name} {n.Description}".Contains("Wintun", StringComparison.OrdinalIgnoreCase)));
+         $"{n.Name} {n.Description}".Contains("WireGuard", StringComparison.OrdinalIgnoreCase)));
 
     public IReadOnlyList<AdapterInfo> GetInternetAdapters() => NetworkInterface.GetAllNetworkInterfaces()
         .Where(n => n.OperationalStatus == OperationalStatus.Up)
         .Where(n => n.NetworkInterfaceType is NetworkInterfaceType.Ethernet or NetworkInterfaceType.Wireless80211)
+        .Where(IsPhysicalInternetAdapter)
         .Select(n =>
         {
             var props = n.GetIPProperties();
@@ -31,6 +31,13 @@ public sealed class NetworkService
         })
         .Where(x => x.InterfaceIndex >= 0 && x.Address is not null)
         .ToList();
+
+    private static bool IsPhysicalInternetAdapter(NetworkInterface adapter)
+    {
+        var identity = $"{adapter.Name} {adapter.Description}";
+        string[] excluded = ["Wintun", "WireGuard", "Proton", "Hyper-V", "VMware", "VirtualBox", "Loopback", "TAP-Windows", "DualLink Bond"];
+        return !excluded.Any(value => identity.Contains(value, StringComparison.OrdinalIgnoreCase));
+    }
 
     public async Task<ProbeResult> ProbeAsync(AdapterInfo adapter, string host, bool tunnelActive, CancellationToken token)
     {
