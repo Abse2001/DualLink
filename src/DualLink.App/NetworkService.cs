@@ -88,6 +88,28 @@ public sealed class NetworkService
         }
     }
 
+    public async Task ApplyBondingEndpointRoutesAsync(IEnumerable<AdapterInfo> adapters, IPAddress endpoint)
+    {
+        foreach (var adapter in adapters.Where(x => x.Gateway is not null))
+            await EnsureHostRouteAsync(endpoint.ToString(), adapter, 1);
+    }
+
+    public async Task ConfigureBondingTunnelAsync()
+    {
+        const string command =
+            "$alias='DualLink Bond'; " +
+            "Get-NetIPAddress -InterfaceAlias $alias -AddressFamily IPv4 -ErrorAction SilentlyContinue | Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue; " +
+            "New-NetIPAddress -InterfaceAlias $alias -IPAddress '10.77.0.2' -PrefixLength 24 -AddressFamily IPv4 -ErrorAction Stop | Out-Null; " +
+            "Set-NetIPInterface -InterfaceAlias $alias -AddressFamily IPv4 -AutomaticMetric Disabled -InterfaceMetric 5 -NlMtuBytes 1380; " +
+            "Remove-NetRoute -DestinationPrefix @('0.0.0.0/1','128.0.0.0/1') -InterfaceAlias $alias -Confirm:$false -ErrorAction SilentlyContinue; " +
+            "New-NetRoute -DestinationPrefix '0.0.0.0/1' -InterfaceAlias $alias -NextHop '10.77.0.1' -RouteMetric 1 -PolicyStore ActiveStore | Out-Null; " +
+            "New-NetRoute -DestinationPrefix '128.0.0.0/1' -InterfaceAlias $alias -NextHop '10.77.0.1' -RouteMetric 1 -PolicyStore ActiveStore | Out-Null";
+        await RunPowerShellAsync(command);
+    }
+
+    public async Task RemoveBondingRoutesAsync() => await RunPowerShellAsync(
+        "$alias='DualLink Bond'; Remove-NetRoute -DestinationPrefix @('0.0.0.0/1','128.0.0.0/1') -InterfaceAlias $alias -Confirm:$false -ErrorAction SilentlyContinue");
+
     private static async Task EnsureHostRouteAsync(string destination, AdapterInfo adapter, int metric)
     {
         if (adapter.Gateway is null) return;
