@@ -39,13 +39,15 @@ var receiveTask = Task.Run(async () =>
         if (!replay.TryAccept(packet.Sequence)) continue;
 
         peers[(packet.SessionId, packet.PathId)] = new Peer(datagram.RemoteEndPoint, DateTimeOffset.UtcNow);
-        if (packet.Kind == BondingPacketKind.Data)
-        {
-            var buffer = reorder.GetOrAdd(packet.SessionId, _ => new PacketReorderBuffer(TimeSpan.FromMilliseconds(150)));
-            foreach (var innerPacket in buffer.Add(packet.Sequence, packet.Payload, DateTimeOffset.UtcNow))
-                await tun.WriteAsync(innerPacket, shutdown.Token);
-        }
-        else if (packet.Kind == BondingPacketKind.Probe)
+        var orderBuffer = reorder.GetOrAdd(packet.SessionId, _ => new PacketReorderBuffer(TimeSpan.FromMilliseconds(150)));
+        var ordered = orderBuffer.Add(
+            packet.Sequence,
+            packet.Kind == BondingPacketKind.Data ? packet.Payload : ReadOnlyMemory<byte>.Empty,
+            DateTimeOffset.UtcNow);
+        foreach (var innerPacket in ordered)
+            if (!innerPacket.IsEmpty) await tun.WriteAsync(innerPacket, shutdown.Token);
+
+        if (packet.Kind == BondingPacketKind.Probe)
         {
             var reply = BondingPacketCodec.Encode(packet with
             {
