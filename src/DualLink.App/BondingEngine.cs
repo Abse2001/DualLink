@@ -39,6 +39,13 @@ internal sealed class BondingEngine : IAsyncDisposable
         _probeTask = Task.Run(ProbeLoopAsync);
     }
 
+    public async Task ConnectAsync(TimeSpan timeout, CancellationToken token)
+    {
+        _client.Start();
+        await _client.ProbeAllAsync(token);
+        await _client.WaitForRelayAsync(timeout, token);
+    }
+
     private async Task CaptureLoopAsync()
     {
         while (!_shutdown.IsCancellationRequested)
