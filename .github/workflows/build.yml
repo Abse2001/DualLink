@@ -24,24 +24,27 @@ jobs:
       - name: Test
         run: dotnet test DualLink.sln --configuration Release --no-restore
       - name: Publish self-contained app
-        if: github.event_name != 'pull_request'
         run: dotnet publish src/DualLink.App/DualLink.App.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish
       - name: Download official Wintun
-        if: github.event_name != 'pull_request'
         shell: pwsh
         run: |
           Invoke-WebRequest https://www.wintun.net/builds/wintun-0.14.1.zip -OutFile wintun.zip
           if ((Get-FileHash wintun.zip -Algorithm SHA256).Hash.ToLower() -ne '07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51') { throw 'Wintun checksum mismatch' }
           Expand-Archive wintun.zip -DestinationPath wintun
           Copy-Item wintun/wintun/bin/amd64/wintun.dll publish/wintun.dll
+          Copy-Item wintun/wintun/LICENSE.txt publish/wintun-license.txt
+      - name: Add bundled Linux relay
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force publish/relay | Out-Null
+          dotnet publish src/DualLink.Relay/DualLink.Relay.csproj -c Release -r linux-x64 --self-contained true -p:PublishSingleFile=true -o publish/relay
+          Copy-Item deploy/linux/install-relay.sh publish/relay/
+          Copy-Item deploy/linux/duallink-relay.service publish/relay/
       - name: Install Inno Setup
-        if: github.event_name != 'pull_request'
         run: choco install innosetup --no-progress -y
       - name: Build installer
-        if: github.event_name != 'pull_request'
         run: iscc installer/DualLink.iss
       - uses: actions/upload-artifact@v5
-        if: github.event_name != 'pull_request'
         with:
           name: DualLink-Setup-x64
           path: artifacts/DualLink-Setup-x64.exe
