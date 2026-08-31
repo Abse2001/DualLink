@@ -3,6 +3,7 @@ using System.Windows;
 using System.Windows.Media;
 using System.Net;
 using System.Windows.Controls;
+using System.Security.Cryptography;
 using DualLink.Core;
 using MediaBrushes = System.Windows.Media.Brushes;
 using MediaColor = System.Windows.Media.Color;
@@ -15,6 +16,7 @@ public partial class MainWindow : Window
     private readonly DualLinkSettings _settings = new();
     private readonly NetworkService _network = new();
     private readonly WireGuardConfigService _wireGuardConfig = new();
+    private readonly ServerProvisioner _serverProvisioner = new();
     private readonly CancellationTokenSource _stop = new();
     private FailoverController _controller;
     private string? _selectedPreferenceId;
@@ -32,7 +34,44 @@ public partial class MainWindow : Window
         AdapterGrid.ItemsSource = _rows;
         _controller = new FailoverController(_settings);
         _wireGuardEndpoint = _wireGuardConfig.LoadEndpoint();
+        if (BondingSettingsStore.Load() is { } saved)
+        {
+            RelayAddressText.Text = saved.RelayAddress;
+            RelayKeyBox.Password = Convert.ToBase64String(saved.Key);
+        }
         Loaded += async (_, _) => await MonitorLoop();
+    }
+
+    private async void SetupServer_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            if (!IPAddress.TryParse(RelayAddressText.Text.Trim(), out var relay) || relay.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork)
+                throw new InvalidOperationException("Enter a valid IPv4 relay address.");
+            var dialog = new Microsoft.Win32.OpenFileDialog { Filter = "AWS private key (*.pem)|*.pem|All files (*.*)|*.*", Title = "Select the AWS EC2 private key" };
+            if (dialog.ShowDialog(this) != true) return;
+
+            var key = RandomNumberGenerator.GetBytes(32);
+            ServerSetupButton.IsEnabled = false;
+            BondingToggleButton.IsEnabled = false;
+            var progress = new Progress<string>(message => StatusText.Text = message);
+            await _serverProvisioner.ProvisionAsync(relay, dialog.FileName, key, progress, _stop.Token);
+            RelayKeyBox.Password = Convert.ToBase64String(key);
+            BondingSettingsStore.Save(relay.ToString(), key);
+            StatusText.Text = "Relay installed and ready; press Start bonding";
+            VpnText.Text = "The bonding key is encrypted for your Windows user with DPAPI.";
+            AppLog.Write($"Relay provisioned at {relay}");
+        }
+        catch (Exception ex)
+        {
+            System.Windows.MessageBox.Show(this, ex.Message, "Unable to set up relay", MessageBoxButton.OK, MessageBoxImage.Error);
+            AppLog.Write($"Relay setup failed: {ex}");
+        }
+        finally
+        {
+            ServerSetupButton.IsEnabled = true;
+            BondingToggleButton.IsEnabled = true;
+        }
     }
 
     private async Task MonitorLoop()
@@ -127,6 +166,7 @@ public partial class MainWindow : Window
             try { key = Convert.FromBase64String(RelayKeyBox.Password.Trim()); }
             catch (FormatException) { throw new InvalidOperationException("The relay key is not valid Base64."); }
             if (key.Length < 32) throw new InvalidOperationException("The relay key must contain 32 bytes.");
+            BondingSettingsStore.Save(relay.ToString(), key);
 
             var adapters = _network.GetInternetAdapters().Where(x => x.Address is not null && x.Gateway is not null).ToArray();
             if (adapters.Length < 2) throw new InvalidOperationException("Connect at least two Internet adapters: Ethernet, Wi-Fi hotspot, or USB tethering.");
