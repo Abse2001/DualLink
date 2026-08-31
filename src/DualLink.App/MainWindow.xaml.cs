@@ -53,8 +53,17 @@ public partial class MainWindow : Window
 
             var key = RandomNumberGenerator.GetBytes(32);
             ServerSetupButton.IsEnabled = false;
+            ServerSetupButton.Content = "Setting up…";
             BondingToggleButton.IsEnabled = false;
-            var progress = new Progress<string>(message => StatusText.Text = message);
+            RelayAddressText.IsEnabled = false;
+            ServerSetupProgressPanel.Visibility = Visibility.Visible;
+            ServerSetupProgressText.Text = "Connecting securely to the relay…";
+            System.Windows.Input.Mouse.OverrideCursor = System.Windows.Input.Cursors.Wait;
+            var progress = new Progress<string>(message =>
+            {
+                ServerSetupProgressText.Text = message;
+                StatusText.Text = message;
+            });
             await _serverProvisioner.ProvisionAsync(relay, dialog.FileName, key, progress, _stop.Token);
             RelayKeyBox.Password = Convert.ToBase64String(key);
             BondingSettingsStore.Save(relay.ToString(), key);
@@ -70,7 +79,11 @@ public partial class MainWindow : Window
         finally
         {
             ServerSetupButton.IsEnabled = true;
+            ServerSetupButton.Content = "Setup server";
             BondingToggleButton.IsEnabled = true;
+            RelayAddressText.IsEnabled = true;
+            ServerSetupProgressPanel.Visibility = Visibility.Collapsed;
+            System.Windows.Input.Mouse.OverrideCursor = null;
         }
     }
 
@@ -169,7 +182,7 @@ public partial class MainWindow : Window
             BondingSettingsStore.Save(relay.ToString(), key);
 
             var adapters = _network.GetInternetAdapters().Where(x => x.Address is not null && x.Gateway is not null).ToArray();
-            if (adapters.Length < 2) throw new InvalidOperationException("Connect at least two Internet adapters: Ethernet, Wi-Fi hotspot, or USB tethering.");
+            if (adapters.Length < 1) throw new InvalidOperationException("Connect at least one Internet adapter: Ethernet, Wi-Fi, or USB tethering.");
             await _network.ApplyBondingEndpointRoutesAsync(adapters, relay);
             var paths = adapters.Select((adapter, index) => new BondingPathConfig(
                 (byte)(index + 1), adapter.Name, adapter.Address!, adapter.InterfaceIndex));
