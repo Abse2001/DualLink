@@ -50,6 +50,12 @@ public partial class MainWindow : Window
         try
         {
             var adapters = _network.GetInternetAdapters();
+            if (_bonding is not null)
+            {
+                var livePaths = adapters.Where(adapter => adapter.Address is not null && adapter.Gateway is not null)
+                    .Select((adapter, index) => new BondingPathConfig((byte)(index + 1), adapter.Name, adapter.Address!, adapter.InterfaceIndex));
+                await _bonding.UpdatePathsAsync(livePaths);
+            }
             UpdateConnectionChoices(adapters);
             var protonActive = ProtonModeCheck.IsChecked == true && _network.IsProtonTunnelActive();
             var routePreference = _lastAppliedId ?? _selectedPreferenceId ?? adapters.FirstOrDefault(x => x.Type == System.Net.NetworkInformation.NetworkInterfaceType.Ethernet)?.Id;
