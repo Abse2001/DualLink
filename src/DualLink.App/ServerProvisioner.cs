@@ -40,9 +40,11 @@ internal sealed class ServerProvisioner
             const string install = "sed -i 's/\\r$//' /tmp/duallink-install/install-relay.sh /tmp/duallink-install/duallink-relay.service && " +
                 "sudo bash /tmp/duallink-install/install-relay.sh /tmp/duallink-install/DualLink.Relay && " +
                 "sudo install -o root -g duallink -m 0640 /tmp/duallink-install/relay.env /etc/duallink/relay.env && " +
-                "sudo systemctl restart duallink-relay.service && sudo systemctl is-active duallink-relay.service";
+                "sudo systemctl restart duallink-relay.service && sleep 2 && " +
+                "sudo systemctl is-active duallink-relay.service && " +
+                "sudo ss -lunp | grep -q ':443 '";
             var result = await RunAsync(ssh, CommonArguments(privateKeyPath, destination).Concat([destination, install]), token);
-            if (!result.Contains("active", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("The relay service did not become active.");
+            if (!result.Contains("active", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("The relay service did not become active or listen on UDP 443.");
             progress.Report("Relay installed and active.");
         }
         finally
