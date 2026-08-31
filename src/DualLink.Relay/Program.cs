@@ -21,7 +21,10 @@ using var udp = new UdpClient(new IPEndPoint(IPAddress.Any, port));
 var peers = new ConcurrentDictionary<(ulong Session, byte Path), Peer>();
 var replays = new ConcurrentDictionary<ulong, ReplayWindow>();
 var reorder = new ConcurrentDictionary<ulong, PacketReorderBuffer>();
-ulong outboundSequence = 0;
+long outboundSequence = 0;
+var pathPacketCounts = new ConcurrentDictionary<(ulong Session, byte Path), int>();
+
+ulong NextOutboundSequence() => unchecked((ulong)Interlocked.Increment(ref outboundSequence));
 
 Console.WriteLine($"DualLink relay listening on UDP {port}; interface dlbond0 created.");
 
@@ -52,10 +55,24 @@ var receiveTask = Task.Run(async () =>
             var reply = BondingPacketCodec.Encode(packet with
             {
                 Kind = BondingPacketKind.ProbeReply,
+                Sequence = NextOutboundSequence(),
                 Direction = BondingDirection.Downlink,
-                Payload = ReadOnlyMemory<byte>.Empty
+                Payload = packet.Payload
             }, key);
             await udp.SendAsync(reply, datagram.RemoteEndPoint, shutdown.Token);
+        }
+        else if (packet.Kind == BondingPacketKind.Data &&
+                 pathPacketCounts.AddOrUpdate((packet.SessionId, packet.PathId), 1, (_, count) => count + 1) % 8 == 0)
+        {
+            var acknowledgement = BondingPacketCodec.Encode(new BondingPacket(
+                BondingPacketKind.Ack,
+                packet.PathId,
+                packet.SessionId,
+                NextOutboundSequence(),
+                packet.Sequence,
+                ReadOnlyMemory<byte>.Empty,
+                BondingDirection.Downlink), key);
+            await udp.SendAsync(acknowledgement, datagram.RemoteEndPoint, shutdown.Token);
         }
     }
 }, shutdown.Token);
@@ -79,12 +96,13 @@ var transmitTask = Task.Run(async () =>
 
         // Phase-one downlink policy alternates live paths. The adaptive metrics
         // scheduler will replace this after client feedback is connected.
-        var selected = active[(int)(outboundSequence % (ulong)active.Length)];
+        var sequence = NextOutboundSequence();
+        var selected = active[(int)(sequence % (ulong)active.Length)];
         var frame = BondingPacketCodec.Encode(new BondingPacket(
             BondingPacketKind.Data,
             selected.Key.Path,
             selected.Key.Session,
-            outboundSequence++,
+            sequence,
             0,
             buffer.AsMemory(0, length),
             BondingDirection.Downlink), key);
