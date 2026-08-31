@@ -5,7 +5,7 @@ using DualLink.Core;
 
 namespace DualLink.App;
 
-public sealed record BondingPathConfig(byte PathId, string PathName, IPAddress LocalAddress);
+public sealed record BondingPathConfig(byte PathId, string PathName, IPAddress LocalAddress, int InterfaceIndex);
 
 public sealed class BondingPathTransport : IAsyncDisposable
 {
@@ -20,6 +20,10 @@ public sealed class BondingPathTransport : IAsyncDisposable
             throw new ArgumentException("Local adapter and relay address families must match.", nameof(config));
 
         _socket = new Socket(relay.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
+        if (relay.AddressFamily == AddressFamily.InterNetwork)
+            _socket.SetSocketOption(SocketOptionLevel.IP, (SocketOptionName)31, IPAddress.HostToNetworkOrder(config.InterfaceIndex));
+        else
+            _socket.SetSocketOption(SocketOptionLevel.IPv6, (SocketOptionName)31, config.InterfaceIndex);
         _socket.Bind(new IPEndPoint(config.LocalAddress, 0));
         _socket.Connect(relay);
     }
