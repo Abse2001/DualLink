@@ -57,6 +57,7 @@ public sealed class DualPathBondingClient : IAsyncDisposable
     private readonly ConcurrentDictionary<ulong, SentPacket> _sentPackets = new();
     private readonly ConcurrentDictionary<byte, PathTelemetry> _telemetry = new();
     private readonly object _taskLock = new();
+    private readonly TaskCompletionSource _relayReady = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     public event Func<ReadOnlyMemory<byte>, ValueTask>? PacketReceived;
 
@@ -140,6 +141,17 @@ public sealed class DualPathBondingClient : IAsyncDisposable
         }
     }
 
+    public async Task WaitForRelayAsync(TimeSpan timeout, CancellationToken token)
+    {
+        using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(token);
+        timeoutSource.CancelAfter(timeout);
+        try { await _relayReady.Task.WaitAsync(timeoutSource.Token); }
+        catch (OperationCanceledException) when (!token.IsCancellationRequested)
+        {
+            throw new TimeoutException("The relay did not answer through any physical connection. Check the server service, key, and UDP port 443.");
+        }
+    }
+
     private async Task ReceiveLoopAsync(BondingPathTransport path, CancellationToken token)
     {
         var buffer = new byte[BondingPacketCodec.HeaderSize + BondingPacketCodec.MaximumPayloadSize + BondingPacketCodec.TagSize];
@@ -155,6 +167,7 @@ public sealed class DualPathBondingClient : IAsyncDisposable
             if (packet.Direction != BondingDirection.Downlink || packet.SessionId != _sessionId) continue;
             if (packet.Kind == BondingPacketKind.ProbeReply && packet.Payload.Length == sizeof(long))
             {
+                _relayReady.TrySetResult();
                 var sentAt = DateTimeOffset.FromUnixTimeMilliseconds(BitConverter.ToInt64(packet.Payload.Span));
                 var rtt = Math.Max(0.1, (DateTimeOffset.UtcNow - sentAt).TotalMilliseconds);
                 _telemetry.AddOrUpdate(packet.PathId, _ => new PathTelemetry(rtt, 0, 10, 1), (_, old) => old with { RttMs = Ewma(old.RttMs, rtt) });
