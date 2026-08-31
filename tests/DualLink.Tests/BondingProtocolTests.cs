@@ -36,7 +36,7 @@ public sealed class BondingProtocolTests
     public void WrongKeyIsRejected()
     {
         var encoded = BondingPacketCodec.Encode(
-            new BondingPacket(BondingPacketKind.Probe, 1, 7, 9, 0, []), Key);
+            new BondingPacket(BondingPacketKind.Probe, 1, 7, 9, 0, Array.Empty<byte>()), Key);
         var wrongKey = Enumerable.Repeat((byte)0xff, 32).ToArray();
 
         Assert.False(BondingPacketCodec.TryDecode(encoded, wrongKey, out _));
