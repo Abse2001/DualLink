@@ -39,6 +39,11 @@ jobs:
           if (-not $dll -or -not $license) { throw 'Official Wintun package layout is invalid' }
           Copy-Item $dll.FullName publish/wintun.dll
           Copy-Item $license.FullName publish/wintun-license.txt
+      - name: Smoke-test Wintun adapter
+        shell: pwsh
+        run: |
+          & ./publish/DualLink.exe --wintun-smoke
+          if ($LASTEXITCODE -ne 0) { throw "Wintun smoke test failed with exit code $LASTEXITCODE" }
       - name: Add bundled Linux relay
         shell: pwsh
         run: |
