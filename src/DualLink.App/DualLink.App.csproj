@@ -8,7 +8,7 @@
     <Nullable>enable</Nullable>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <AssemblyName>DualLink</AssemblyName>
-    <Version>2.0.1</Version>
+    <Version>2.0.2</Version>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\DualLink.Core\DualLink.Core.csproj" />
