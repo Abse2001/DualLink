@@ -19,7 +19,9 @@ public sealed class BondingProtocolTests
         Assert.Equal(original.SessionId, decoded.SessionId);
         Assert.Equal(original.Sequence, decoded.Sequence);
         Assert.Equal(original.Acknowledgement, decoded.Acknowledgement);
+        Assert.Equal(original.Direction, decoded.Direction);
         Assert.Equal(original.Payload.ToArray(), decoded.Payload.ToArray());
+        Assert.Equal(-1, encoded.AsSpan().IndexOf("hello"u8));
     }
 
     [Fact]
