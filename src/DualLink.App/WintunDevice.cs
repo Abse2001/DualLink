@@ -21,7 +21,7 @@ internal sealed class WintunDevice : IDisposable
     public WintunDevice(string name = "DualLink Bond")
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Wintun requires Windows.");
-        _library = NativeLibrary.Load(Path.Combine(AppContext.BaseDirectory, "wintun.dll"));
+        _library = NativeLibrary.Load(System.IO.Path.Combine(AppContext.BaseDirectory, "wintun.dll"));
         var createAdapter = Load<WintunCreateAdapterDelegate>("WintunCreateAdapter");
         _closeAdapter = Load<WintunCloseAdapterDelegate>("WintunCloseAdapter");
         var startSession = Load<WintunStartSessionDelegate>("WintunStartSession");
