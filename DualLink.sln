@@ -8,6 +8,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DualLink.App", "src\DualLin
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DualLink.Tests", "tests\DualLink.Tests\DualLink.Tests.csproj", "{BE3C6E7D-F994-4265-975E-5699748FE44D}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DualLink.Relay", "src\DualLink.Relay\DualLink.Relay.csproj", "{7E335E24-57ED-4910-A350-216C7C53E4DA}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -26,5 +28,9 @@ Global
 		{BE3C6E7D-F994-4265-975E-5699748FE44D}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{BE3C6E7D-F994-4265-975E-5699748FE44D}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{BE3C6E7D-F994-4265-975E-5699748FE44D}.Release|Any CPU.Build.0 = Release|Any CPU
+		{7E335E24-57ED-4910-A350-216C7C53E4DA}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{7E335E24-57ED-4910-A350-216C7C53E4DA}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{7E335E24-57ED-4910-A350-216C7C53E4DA}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{7E335E24-57ED-4910-A350-216C7C53E4DA}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal

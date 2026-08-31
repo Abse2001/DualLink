@@ -13,12 +13,12 @@ public sealed class NetworkService
     public bool IsProtonTunnelActive() => NetworkInterface.GetAllNetworkInterfaces().Any(n =>
         n.OperationalStatus == OperationalStatus.Up &&
         ($"{n.Name} {n.Description}".Contains("Proton", StringComparison.OrdinalIgnoreCase) ||
-         $"{n.Name} {n.Description}".Contains("WireGuard", StringComparison.OrdinalIgnoreCase) ||
-         $"{n.Name} {n.Description}".Contains("Wintun", StringComparison.OrdinalIgnoreCase)));
+         $"{n.Name} {n.Description}".Contains("WireGuard", StringComparison.OrdinalIgnoreCase)));
 
     public IReadOnlyList<AdapterInfo> GetInternetAdapters() => NetworkInterface.GetAllNetworkInterfaces()
         .Where(n => n.OperationalStatus == OperationalStatus.Up)
         .Where(n => n.NetworkInterfaceType is NetworkInterfaceType.Ethernet or NetworkInterfaceType.Wireless80211)
+        .Where(IsPhysicalInternetAdapter)
         .Select(n =>
         {
             var props = n.GetIPProperties();
@@ -31,6 +31,13 @@ public sealed class NetworkService
         })
         .Where(x => x.InterfaceIndex >= 0 && x.Address is not null)
         .ToList();
+
+    private static bool IsPhysicalInternetAdapter(NetworkInterface adapter)
+    {
+        var identity = $"{adapter.Name} {adapter.Description}";
+        string[] excluded = ["Wintun", "WireGuard", "Proton", "Hyper-V", "VMware", "VirtualBox", "Loopback", "TAP-Windows", "DualLink Bond"];
+        return !excluded.Any(value => identity.Contains(value, StringComparison.OrdinalIgnoreCase));
+    }
 
     public async Task<ProbeResult> ProbeAsync(AdapterInfo adapter, string host, bool tunnelActive, CancellationToken token)
     {
@@ -86,6 +93,34 @@ public sealed class NetworkService
             var metric = adapter.Id == preferredId ? 1 : 50;
             await EnsureHostRouteAsync(endpoint.ToString(), adapter, metric);
         }
+    }
+
+    public async Task ApplyBondingEndpointRoutesAsync(IEnumerable<AdapterInfo> adapters, IPAddress endpoint)
+    {
+        foreach (var adapter in adapters.Where(x => x.Gateway is not null))
+            await EnsureHostRouteAsync(endpoint.ToString(), adapter, 1);
+    }
+
+    public async Task ConfigureBondingTunnelAsync()
+    {
+        const string command =
+            "$alias='DualLink Bond'; " +
+            "Get-NetIPAddress -InterfaceAlias $alias -AddressFamily IPv4 -ErrorAction SilentlyContinue | Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue; " +
+            "New-NetIPAddress -InterfaceAlias $alias -IPAddress '10.77.0.2' -PrefixLength 24 -AddressFamily IPv4 -ErrorAction Stop | Out-Null; " +
+            "Set-NetIPInterface -InterfaceAlias $alias -AddressFamily IPv4 -AutomaticMetric Disabled -InterfaceMetric 5 -NlMtuBytes 1380; " +
+            "Remove-NetRoute -DestinationPrefix @('0.0.0.0/1','128.0.0.0/1') -InterfaceAlias $alias -Confirm:$false -ErrorAction SilentlyContinue; " +
+            "New-NetRoute -DestinationPrefix '0.0.0.0/1' -InterfaceAlias $alias -NextHop '10.77.0.1' -RouteMetric 1 -PolicyStore ActiveStore | Out-Null; " +
+            "New-NetRoute -DestinationPrefix '128.0.0.0/1' -InterfaceAlias $alias -NextHop '10.77.0.1' -RouteMetric 1 -PolicyStore ActiveStore | Out-Null";
+        await RunPowerShellAsync(command);
+    }
+
+    public async Task RemoveBondingRoutesAsync() => await RunPowerShellAsync(
+        "$alias='DualLink Bond'; Remove-NetRoute -DestinationPrefix @('0.0.0.0/1','128.0.0.0/1') -InterfaceAlias $alias -Confirm:$false -ErrorAction SilentlyContinue");
+
+    public async Task RemoveBondingEndpointRoutesAsync(IEnumerable<AdapterInfo> adapters, IPAddress endpoint)
+    {
+        foreach (var adapter in adapters)
+            await RunPowerShellAsync($"Remove-NetRoute -DestinationPrefix '{endpoint}/32' -InterfaceIndex {adapter.InterfaceIndex} -AddressFamily IPv4 -Confirm:$false -ErrorAction SilentlyContinue");
     }
 
     private static async Task EnsureHostRouteAsync(string destination, AdapterInfo adapter, int metric)

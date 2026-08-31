@@ -1,6 +1,9 @@
 using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Media;
+using System.Net;
+using System.Windows.Controls;
+using System.Security.Cryptography;
 using DualLink.Core;
 using MediaBrushes = System.Windows.Media.Brushes;
 using MediaColor = System.Windows.Media.Color;
@@ -13,6 +16,7 @@ public partial class MainWindow : Window
     private readonly DualLinkSettings _settings = new();
     private readonly NetworkService _network = new();
     private readonly WireGuardConfigService _wireGuardConfig = new();
+    private readonly ServerProvisioner _serverProvisioner = new();
     private readonly CancellationTokenSource _stop = new();
     private FailoverController _controller;
     private string? _selectedPreferenceId;
@@ -21,6 +25,8 @@ public partial class MainWindow : Window
     private bool _updatingChoices;
     private System.Net.IPAddress? _wireGuardEndpoint;
     private string? _endpointRouteSignature;
+    private BondingEngine? _bonding;
+    private IReadOnlyCollection<BondingPathSample> _bondingSamples = [];
 
     public MainWindow()
     {
@@ -28,7 +34,44 @@ public partial class MainWindow : Window
         AdapterGrid.ItemsSource = _rows;
         _controller = new FailoverController(_settings);
         _wireGuardEndpoint = _wireGuardConfig.LoadEndpoint();
+        if (BondingSettingsStore.Load() is { } saved)
+        {
+            RelayAddressText.Text = saved.RelayAddress;
+            RelayKeyBox.Password = Convert.ToBase64String(saved.Key);
+        }
         Loaded += async (_, _) => await MonitorLoop();
+    }
+
+    private async void SetupServer_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            if (!IPAddress.TryParse(RelayAddressText.Text.Trim(), out var relay) || relay.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork)
+                throw new InvalidOperationException("Enter a valid IPv4 relay address.");
+            var dialog = new Microsoft.Win32.OpenFileDialog { Filter = "AWS private key (*.pem)|*.pem|All files (*.*)|*.*", Title = "Select the AWS EC2 private key" };
+            if (dialog.ShowDialog(this) != true) return;
+
+            var key = RandomNumberGenerator.GetBytes(32);
+            ServerSetupButton.IsEnabled = false;
+            BondingToggleButton.IsEnabled = false;
+            var progress = new Progress<string>(message => StatusText.Text = message);
+            await _serverProvisioner.ProvisionAsync(relay, dialog.FileName, key, progress, _stop.Token);
+            RelayKeyBox.Password = Convert.ToBase64String(key);
+            BondingSettingsStore.Save(relay.ToString(), key);
+            StatusText.Text = "Relay installed and ready; press Start bonding";
+            VpnText.Text = "The bonding key is encrypted for your Windows user with DPAPI.";
+            AppLog.Write($"Relay provisioned at {relay}");
+        }
+        catch (Exception ex)
+        {
+            System.Windows.MessageBox.Show(this, ex.Message, "Unable to set up relay", MessageBoxButton.OK, MessageBoxImage.Error);
+            AppLog.Write($"Relay setup failed: {ex}");
+        }
+        finally
+        {
+            ServerSetupButton.IsEnabled = true;
+            BondingToggleButton.IsEnabled = true;
+        }
     }
 
     private async Task MonitorLoop()
@@ -46,13 +89,19 @@ public partial class MainWindow : Window
         try
         {
             var adapters = _network.GetInternetAdapters();
+            if (_bonding is not null)
+            {
+                var livePaths = adapters.Where(adapter => adapter.Address is not null && adapter.Gateway is not null)
+                    .Select((adapter, index) => new BondingPathConfig((byte)(index + 1), adapter.Name, adapter.Address!, adapter.InterfaceIndex));
+                await _bonding.UpdatePathsAsync(livePaths);
+            }
             UpdateConnectionChoices(adapters);
             var protonActive = ProtonModeCheck.IsChecked == true && _network.IsProtonTunnelActive();
             var routePreference = _lastAppliedId ?? _selectedPreferenceId ?? adapters.FirstOrDefault(x => x.Type == System.Net.NetworkInformation.NetworkInterfaceType.Ethernet)?.Id;
             await EnsureEndpointRoutesAsync(adapters, routePreference);
             var probes = await Task.WhenAll(adapters.Select(x => _network.ProbeAsync(x, _settings.ProbeHost, protonActive, _stop.Token)));
             var decision = ChooseConnection(probes);
-            if (AutoCheck.IsChecked == true && decision.ActiveAdapterId is not null && decision.Changed)
+            if (_bonding is null && AutoCheck.IsChecked == true && decision.ActiveAdapterId is not null && decision.Changed)
             {
                 await _network.ApplyMetricsAsync(adapters, decision.ActiveAdapterId, _settings.PreferredMetric, _settings.BackupMetric);
                 await EnsureEndpointRoutesAsync(adapters, decision.ActiveAdapterId, force: true);
@@ -65,6 +114,19 @@ public partial class MainWindow : Window
                 var probe = probes.First(x => x.AdapterId == adapter.Id);
                 _rows.Add(AdapterRow.From(adapter, probe, decision.ActiveAdapterId == adapter.Id));
             }
+            _bondingSamples = adapters.Select(adapter =>
+            {
+                var probe = probes.First(x => x.AdapterId == adapter.Id);
+                return new BondingPathSample(
+                    adapter.Name,
+                    probe.Online,
+                    probe.LatencyMs,
+                    probe.JitterMs,
+                    probe.PacketLossPercent,
+                    adapter.Type == System.Net.NetworkInformation.NetworkInterfaceType.Ethernet ? 20 : 30,
+                    0,
+                    Math.Clamp(1 - probe.PacketLossPercent / 100d, 0, 1));
+            }).ToArray();
             ActiveText.Text = decision.ActiveAdapterId is null ? "" : $"Active: {adapters.FirstOrDefault(x => x.Id == decision.ActiveAdapterId)?.Name}";
             StatusText.Text = decision.Reason;
             VpnText.Text = ProtonModeCheck.IsChecked == true
@@ -86,6 +148,68 @@ public partial class MainWindow : Window
             StatusDot.Fill = MediaBrushes.Red;
             AppLog.Write(ex.ToString());
         }
+    }
+
+    private async void BondingToggle_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            if (_bonding is not null)
+            {
+                await StopBondingAsync();
+                return;
+            }
+
+            if (!IPAddress.TryParse(RelayAddressText.Text.Trim(), out var relay) || relay.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork)
+                throw new InvalidOperationException("Enter a valid IPv4 relay address.");
+            byte[] key;
+            try { key = Convert.FromBase64String(RelayKeyBox.Password.Trim()); }
+            catch (FormatException) { throw new InvalidOperationException("The relay key is not valid Base64."); }
+            if (key.Length < 32) throw new InvalidOperationException("The relay key must contain 32 bytes.");
+            BondingSettingsStore.Save(relay.ToString(), key);
+
+            var adapters = _network.GetInternetAdapters().Where(x => x.Address is not null && x.Gateway is not null).ToArray();
+            if (adapters.Length < 2) throw new InvalidOperationException("Connect at least two Internet adapters: Ethernet, Wi-Fi hotspot, or USB tethering.");
+            await _network.ApplyBondingEndpointRoutesAsync(adapters, relay);
+            var paths = adapters.Select((adapter, index) => new BondingPathConfig(
+                (byte)(index + 1), adapter.Name, adapter.Address!, adapter.InterfaceIndex));
+            _bonding = new BondingEngine(paths, relay, 443, key, () => _bondingSamples);
+            StatusText.Text = "Testing encrypted relay connectivity on every physical path…";
+            await _bonding.ConnectAsync(TimeSpan.FromSeconds(6), _stop.Token);
+            await _network.ConfigureBondingTunnelAsync();
+            _bonding.Mode = SelectedBondingMode();
+            _bonding.Start();
+            BondingToggleButton.Content = "Stop bonding";
+            StatusText.Text = "Bonding connected through the DualLink relay";
+            VpnText.Text = $"Public traffic is routed through {relay}; both physical adapters are independently bound.";
+            AppLog.Write($"Bonding started through {relay}");
+        }
+        catch (Exception ex)
+        {
+            if (_bonding is not null) await StopBondingAsync();
+            System.Windows.MessageBox.Show(this, ex.Message, "Unable to start bonding", MessageBoxButton.OK, MessageBoxImage.Error);
+            AppLog.Write($"Bonding start failed: {ex}");
+        }
+    }
+
+    private BondingMode SelectedBondingMode() =>
+        (BondingModeCombo.SelectedItem as ComboBoxItem)?.Content?.ToString() switch
+        {
+            "Failover" => BondingMode.Failover,
+            "Redundant" => BondingMode.Redundant,
+            _ => BondingMode.Bonding
+        };
+
+    private async Task StopBondingAsync()
+    {
+        await _network.RemoveBondingRoutesAsync();
+        if (_bonding is not null) await _bonding.DisposeAsync();
+        _bonding = null;
+        if (IPAddress.TryParse(RelayAddressText.Text.Trim(), out var relay))
+            await _network.RemoveBondingEndpointRoutesAsync(_network.GetInternetAdapters(), relay);
+        BondingToggleButton.Content = "Start bonding";
+        StatusText.Text = "Bonding stopped; existing failover monitoring remains active";
+        AppLog.Write("Bonding stopped");
     }
 
     private FailoverDecision ChooseConnection(IReadOnlyCollection<ProbeResult> probes)
@@ -119,7 +243,7 @@ public partial class MainWindow : Window
     private void UpdateConnectionChoices(IReadOnlyList<AdapterInfo> adapters)
     {
         var choices = new List<AdapterChoice> { new(null, "Automatic — best quality") };
-        choices.AddRange(adapters.Select(x => new AdapterChoice(x.Id, $"Prefer {x.Name} ({FriendlyType(x.Type)})")));
+        choices.AddRange(adapters.Select(x => new AdapterChoice(x.Id, $"Prefer {x.Name} ({FriendlyType(x)})")));
         var existingIds = PreferredCombo.Items.Cast<AdapterChoice>().Select(x => x.Id).ToList();
         if (existingIds.SequenceEqual(choices.Select(x => x.Id))) return;
         _updatingChoices = true;
@@ -128,8 +252,15 @@ public partial class MainWindow : Window
         _updatingChoices = false;
     }
 
-    private static string FriendlyType(System.Net.NetworkInformation.NetworkInterfaceType type) =>
-        type == System.Net.NetworkInformation.NetworkInterfaceType.Wireless80211 ? "Wi-Fi" : "Ethernet";
+    private static string FriendlyType(AdapterInfo adapter)
+    {
+        var identity = $"{adapter.Name} {adapter.Description}";
+        if (identity.Contains("USB", StringComparison.OrdinalIgnoreCase) ||
+            identity.Contains("RNDIS", StringComparison.OrdinalIgnoreCase) ||
+            identity.Contains("iPhone", StringComparison.OrdinalIgnoreCase) ||
+            identity.Contains("Apple Mobile", StringComparison.OrdinalIgnoreCase)) return "USB tethering";
+        return adapter.Type == System.Net.NetworkInformation.NetworkInterfaceType.Wireless80211 ? "Wi-Fi" : "Ethernet";
+    }
 
     private void PreferredCombo_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
     {
@@ -179,16 +310,28 @@ public partial class MainWindow : Window
         StatusText.Text = "Windows automatic metrics restored";
     }
 
-    protected override void OnClosed(EventArgs e) { _stop.Cancel(); base.OnClosed(e); }
+    protected override void OnClosed(EventArgs e)
+    {
+        _stop.Cancel();
+        if (_bonding is not null) StopBondingAsync().GetAwaiter().GetResult();
+        base.OnClosed(e);
+    }
 }
 
 public sealed record AdapterRow(string Name, string Type, string Address, string Latency, string Jitter, string Loss, string Score, string Role)
 {
     public static AdapterRow From(AdapterInfo adapter, ProbeResult probe, bool active) => new(
-        adapter.Name, adapter.Type.ToString(), adapter.Address?.ToString() ?? "—",
+        adapter.Name, FriendlyType(adapter), adapter.Address?.ToString() ?? "—",
         probe.Online ? $"{probe.LatencyMs:0} ms" : "Offline",
         probe.Online ? $"{probe.JitterMs:0} ms" : "—",
         $"{probe.PacketLossPercent:0}%", $"{probe.Score:0}", active ? "Preferred" : "Backup");
+
+    private static string FriendlyType(AdapterInfo adapter)
+    {
+        var identity = $"{adapter.Name} {adapter.Description}";
+        if (identity.Contains("USB", StringComparison.OrdinalIgnoreCase) || identity.Contains("RNDIS", StringComparison.OrdinalIgnoreCase) || identity.Contains("iPhone", StringComparison.OrdinalIgnoreCase)) return "USB tethering";
+        return adapter.Type == System.Net.NetworkInformation.NetworkInterfaceType.Wireless80211 ? "Wi-Fi" : "Ethernet";
+    }
 }
 
 public sealed record AdapterChoice(string? Id, string DisplayName);

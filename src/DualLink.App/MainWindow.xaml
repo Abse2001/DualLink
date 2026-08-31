@@ -10,16 +10,29 @@
   <Grid Margin="22">
     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
     <DockPanel Grid.Row="0" Margin="0,0,0,16">
-      <StackPanel DockPanel.Dock="Left"><TextBlock FontSize="32" FontWeight="Bold" Text="DualLink"/><TextBlock Foreground="#CBD5E1" FontSize="14" Text="Reliable Ethernet + hotspot failover for Windows 11"/></StackPanel>
+      <StackPanel DockPanel.Dock="Left"><TextBlock FontSize="32" FontWeight="Bold" Text="DualLink"/><TextBlock Foreground="#CBD5E1" FontSize="14" Text="Bonded Ethernet + Wi-Fi + USB tethering for Windows 11"/></StackPanel>
       <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right"><Button Content="Prepare Proton config" Click="PrepareWireGuard_Click"/><Button Content="Probe now" Click="ProbeNow_Click"/><Button Content="Restore Windows defaults" Click="Restore_Click"/></StackPanel>
     </DockPanel>
     <Border Grid.Row="1" Background="#132238" BorderBrush="#334155" BorderThickness="1" CornerRadius="10" Padding="14" Margin="0,0,0,12">
-      <WrapPanel VerticalAlignment="Center">
-        <TextBlock FontWeight="Bold" Margin="0,7,8,0" Text="Preferred connection:"/>
-        <ComboBox x:Name="PreferredCombo" DisplayMemberPath="DisplayName" SelectionChanged="PreferredCombo_SelectionChanged" Margin="0,0,22,0"/>
-        <CheckBox x:Name="AutoCheck" Content="Manage routes automatically" IsChecked="True" Margin="0,0,22,0"/>
-        <CheckBox x:Name="ProtonModeCheck" Content="Proton-safe gaming mode" IsChecked="True"/>
-      </WrapPanel>
+      <StackPanel>
+        <WrapPanel VerticalAlignment="Center">
+          <TextBlock FontWeight="Bold" Margin="0,7,8,0" Text="Preferred connection:"/>
+          <ComboBox x:Name="PreferredCombo" DisplayMemberPath="DisplayName" SelectionChanged="PreferredCombo_SelectionChanged" Margin="0,0,22,0"/>
+          <CheckBox x:Name="AutoCheck" Content="Manage routes automatically" IsChecked="True" Margin="0,0,22,0"/>
+          <CheckBox x:Name="ProtonModeCheck" Content="Proton-safe gaming mode" IsChecked="True"/>
+        </WrapPanel>
+        <WrapPanel Margin="0,12,0,0">
+          <TextBlock FontWeight="Bold" Margin="0,7,8,0" Text="Bonding relay:"/>
+          <TextBox x:Name="RelayAddressText" Width="150" Padding="8,5" Text="63.188.146.220" Background="#FFFFFF" Foreground="#0F172A" Margin="0,0,10,0"/>
+          <TextBlock Margin="0,7,8,0" Text="Key:"/>
+          <PasswordBox x:Name="RelayKeyBox" Width="240" Padding="8,5" Background="#FFFFFF" Foreground="#0F172A" Margin="0,0,10,0"/>
+          <ComboBox x:Name="BondingModeCombo" Width="130" Margin="0,0,10,0">
+            <ComboBoxItem Content="Bonding" IsSelected="True"/><ComboBoxItem Content="Failover"/><ComboBoxItem Content="Redundant"/>
+          </ComboBox>
+          <Button x:Name="ServerSetupButton" Content="Setup server" Click="SetupServer_Click" Padding="14,6" Margin="0,0,8,0"/>
+          <Button x:Name="BondingToggleButton" Content="Start bonding" Click="BondingToggle_Click" Padding="14,6"/>
+        </WrapPanel>
+      </StackPanel>
     </Border>
     <Border Grid.Row="2" Background="#132238" BorderBrush="#334155" BorderThickness="1" CornerRadius="10" Padding="14" Margin="0,0,0,14">
       <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
@@ -41,7 +54,7 @@
       </DataGrid.Columns>
     </DataGrid>
     <Border Grid.Row="4" Margin="0,14,0,0" Padding="12" Background="#3B2A12" BorderBrush="#A16207" BorderThickness="1" CornerRadius="8">
-      <TextBlock Foreground="#FEF3C7" Text="For GTA: use Prepare Proton config, import the generated -DualLink.conf into WireGuard, then activate it with both links connected. DualLink pins the Proton endpoint outside the tunnel and switches that endpoint between physical links." TextWrapping="Wrap"/>
+      <TextBlock Foreground="#FEF3C7" Text="Bonding mode sends traffic through the DualLink relay so games keep one public IP while Ethernet, Wi-Fi hotspot, and USB tethering contribute simultaneously. Existing Proton-safe failover remains available when bonding is stopped." TextWrapping="Wrap"/>
     </Border>
   </Grid>
 </Window>
