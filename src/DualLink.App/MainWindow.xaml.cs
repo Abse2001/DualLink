@@ -1,6 +1,8 @@
 using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Media;
+using System.Net;
+using System.Windows.Controls;
 using DualLink.Core;
 using MediaBrushes = System.Windows.Media.Brushes;
 using MediaColor = System.Windows.Media.Color;
@@ -21,6 +23,8 @@ public partial class MainWindow : Window
     private bool _updatingChoices;
     private System.Net.IPAddress? _wireGuardEndpoint;
     private string? _endpointRouteSignature;
+    private BondingEngine? _bonding;
+    private IReadOnlyCollection<BondingPathSample> _bondingSamples = [];
 
     public MainWindow()
     {
@@ -52,7 +56,7 @@ public partial class MainWindow : Window
             await EnsureEndpointRoutesAsync(adapters, routePreference);
             var probes = await Task.WhenAll(adapters.Select(x => _network.ProbeAsync(x, _settings.ProbeHost, protonActive, _stop.Token)));
             var decision = ChooseConnection(probes);
-            if (AutoCheck.IsChecked == true && decision.ActiveAdapterId is not null && decision.Changed)
+            if (_bonding is null && AutoCheck.IsChecked == true && decision.ActiveAdapterId is not null && decision.Changed)
             {
                 await _network.ApplyMetricsAsync(adapters, decision.ActiveAdapterId, _settings.PreferredMetric, _settings.BackupMetric);
                 await EnsureEndpointRoutesAsync(adapters, decision.ActiveAdapterId, force: true);
@@ -65,6 +69,19 @@ public partial class MainWindow : Window
                 var probe = probes.First(x => x.AdapterId == adapter.Id);
                 _rows.Add(AdapterRow.From(adapter, probe, decision.ActiveAdapterId == adapter.Id));
             }
+            _bondingSamples = adapters.Select(adapter =>
+            {
+                var probe = probes.First(x => x.AdapterId == adapter.Id);
+                return new BondingPathSample(
+                    adapter.Name,
+                    probe.Online,
+                    probe.LatencyMs,
+                    probe.JitterMs,
+                    probe.PacketLossPercent,
+                    adapter.Type == System.Net.NetworkInformation.NetworkInterfaceType.Ethernet ? 20 : 30,
+                    0,
+                    Math.Clamp(1 - probe.PacketLossPercent / 100d, 0, 1));
+            }).ToArray();
             ActiveText.Text = decision.ActiveAdapterId is null ? "" : $"Active: {adapters.FirstOrDefault(x => x.Id == decision.ActiveAdapterId)?.Name}";
             StatusText.Text = decision.Reason;
             VpnText.Text = ProtonModeCheck.IsChecked == true
@@ -86,6 +103,63 @@ public partial class MainWindow : Window
             StatusDot.Fill = MediaBrushes.Red;
             AppLog.Write(ex.ToString());
         }
+    }
+
+    private async void BondingToggle_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            if (_bonding is not null)
+            {
+                await StopBondingAsync();
+                return;
+            }
+
+            if (!IPAddress.TryParse(RelayAddressText.Text.Trim(), out var relay) || relay.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork)
+                throw new InvalidOperationException("Enter a valid IPv4 relay address.");
+            byte[] key;
+            try { key = Convert.FromBase64String(RelayKeyBox.Password.Trim()); }
+            catch (FormatException) { throw new InvalidOperationException("The relay key is not valid Base64."); }
+            if (key.Length < 32) throw new InvalidOperationException("The relay key must contain 32 bytes.");
+
+            var adapters = _network.GetInternetAdapters().Where(x => x.Address is not null && x.Gateway is not null).ToArray();
+            if (adapters.Length < 2) throw new InvalidOperationException("Connect both Ethernet and the phone hotspot before starting bonding.");
+            await _network.ApplyBondingEndpointRoutesAsync(adapters, relay);
+            var paths = adapters.Take(2).Select((adapter, index) => new BondingPathConfig(
+                (byte)(index + 1), adapter.Name, adapter.Address!, adapter.InterfaceIndex));
+            _bonding = new BondingEngine(paths, relay, 443, key, () => _bondingSamples);
+            await _network.ConfigureBondingTunnelAsync();
+            _bonding.Mode = SelectedBondingMode();
+            _bonding.Start();
+            BondingToggleButton.Content = "Stop bonding";
+            StatusText.Text = "Bonding connected through the DualLink relay";
+            VpnText.Text = $"Public traffic is routed through {relay}; both physical adapters are independently bound.";
+            AppLog.Write($"Bonding started through {relay}");
+        }
+        catch (Exception ex)
+        {
+            if (_bonding is not null) await StopBondingAsync();
+            MessageBox.Show(this, ex.Message, "Unable to start bonding", MessageBoxButton.OK, MessageBoxImage.Error);
+            AppLog.Write($"Bonding start failed: {ex}");
+        }
+    }
+
+    private BondingMode SelectedBondingMode() =>
+        (BondingModeCombo.SelectedItem as ComboBoxItem)?.Content?.ToString() switch
+        {
+            "Failover" => BondingMode.Failover,
+            "Redundant" => BondingMode.Redundant,
+            _ => BondingMode.Bonding
+        };
+
+    private async Task StopBondingAsync()
+    {
+        await _network.RemoveBondingRoutesAsync();
+        if (_bonding is not null) await _bonding.DisposeAsync();
+        _bonding = null;
+        BondingToggleButton.Content = "Start bonding";
+        StatusText.Text = "Bonding stopped; existing failover monitoring remains active";
+        AppLog.Write("Bonding stopped");
     }
 
     private FailoverDecision ChooseConnection(IReadOnlyCollection<ProbeResult> probes)
@@ -179,7 +253,12 @@ public partial class MainWindow : Window
         StatusText.Text = "Windows automatic metrics restored";
     }
 
-    protected override void OnClosed(EventArgs e) { _stop.Cancel(); base.OnClosed(e); }
+    protected override void OnClosed(EventArgs e)
+    {
+        _stop.Cancel();
+        if (_bonding is not null) StopBondingAsync().GetAwaiter().GetResult();
+        base.OnClosed(e);
+    }
 }
 
 public sealed record AdapterRow(string Name, string Type, string Address, string Latency, string Jitter, string Loss, string Score, string Role)
