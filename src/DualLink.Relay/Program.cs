@@ -33,6 +33,7 @@ var receiveTask = Task.Run(async () =>
         catch (OperationCanceledException) { break; }
 
         if (!BondingPacketCodec.TryDecode(datagram.Buffer, key, out var packet) || packet is null) continue;
+        if (packet.Direction != BondingDirection.Uplink) continue;
         var replay = replays.GetOrAdd(packet.SessionId, _ => new ReplayWindow());
         if (!replay.TryAccept(packet.Sequence)) continue;
 
@@ -45,7 +46,12 @@ var receiveTask = Task.Run(async () =>
         }
         else if (packet.Kind == BondingPacketKind.Probe)
         {
-            var reply = BondingPacketCodec.Encode(packet with { Kind = BondingPacketKind.ProbeReply, Payload = ReadOnlyMemory<byte>.Empty }, key);
+            var reply = BondingPacketCodec.Encode(packet with
+            {
+                Kind = BondingPacketKind.ProbeReply,
+                Direction = BondingDirection.Downlink,
+                Payload = ReadOnlyMemory<byte>.Empty
+            }, key);
             await udp.SendAsync(reply, datagram.RemoteEndPoint, shutdown.Token);
         }
     }
@@ -77,7 +83,8 @@ var transmitTask = Task.Run(async () =>
             selected.Key.Session,
             outboundSequence++,
             0,
-            buffer.AsMemory(0, length)), key);
+            buffer.AsMemory(0, length),
+            BondingDirection.Downlink), key);
         await udp.SendAsync(frame, selected.Value.EndPoint, shutdown.Token);
     }
 }, shutdown.Token);
