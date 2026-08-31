@@ -16,6 +16,7 @@ Console.CancelKeyPress += (_, eventArgs) => { eventArgs.Cancel = true; shutdown.
 AppDomain.CurrentDomain.ProcessExit += (_, _) => shutdown.Cancel();
 
 using var tun = new LinuxTunDevice("dlbond0");
+await RelayNetwork.ConfigureAsync(shutdown.Token);
 using var udp = new UdpClient(new IPEndPoint(IPAddress.Any, port));
 var peers = new ConcurrentDictionary<(ulong Session, byte Path), Peer>();
 var replays = new ConcurrentDictionary<ulong, ReplayWindow>();
