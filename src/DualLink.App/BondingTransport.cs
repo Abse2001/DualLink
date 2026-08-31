@@ -79,6 +79,27 @@ public sealed class DualPathBondingClient : IAsyncDisposable
         BondingMode mode,
         CancellationToken token)
     {
+        if (mode == BondingMode.Redundant)
+        {
+            var healthy = samples.Where(sample => sample.Online && _paths.ContainsKey(sample.PathId)).ToArray();
+            if (healthy.Length == 0) return null;
+            var duplicateSequence = NextSequence();
+            foreach (var sample in healthy)
+            {
+                var duplicatePath = _paths[sample.PathId];
+                var duplicate = BondingPacketCodec.Encode(new BondingPacket(
+                    BondingPacketKind.Data,
+                    duplicatePath.Config.PathId,
+                    _sessionId,
+                    duplicateSequence,
+                    0,
+                    innerPacket,
+                    BondingDirection.Uplink), _key);
+                await duplicatePath.SendAsync(duplicate, token);
+            }
+            return string.Join(" + ", healthy.Select(sample => sample.PathId));
+        }
+
         var pathName = _scheduler.SelectPath(samples, innerPacket.Length, mode);
         if (pathName is null || !_paths.TryGetValue(pathName, out var path)) return null;
         var sequence = NextSequence();
