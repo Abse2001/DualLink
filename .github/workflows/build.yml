@@ -28,11 +28,15 @@ jobs:
       - name: Download official Wintun
         shell: pwsh
         run: |
+          if (-not (Test-Path publish/DualLink.exe)) { dotnet publish src/DualLink.App/DualLink.App.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish }
           Invoke-WebRequest https://www.wintun.net/builds/wintun-0.14.1.zip -OutFile wintun.zip
           if ((Get-FileHash wintun.zip -Algorithm SHA256).Hash.ToLower() -ne '07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51') { throw 'Wintun checksum mismatch' }
           Expand-Archive wintun.zip -DestinationPath wintun
-          Copy-Item wintun/wintun/bin/amd64/wintun.dll publish/wintun.dll
-          Copy-Item wintun/wintun/LICENSE.txt publish/wintun-license.txt
+          $dll = Get-ChildItem wintun -Recurse -Filter wintun.dll | Where-Object { $_.FullName -match 'amd64' } | Select-Object -First 1
+          $license = Get-ChildItem wintun -Recurse -Filter LICENSE.txt | Select-Object -First 1
+          if (-not $dll -or -not $license) { throw 'Official Wintun package layout is invalid' }
+          Copy-Item $dll.FullName publish/wintun.dll
+          Copy-Item $license.FullName publish/wintun-license.txt
       - name: Add bundled Linux relay
         shell: pwsh
         run: |
