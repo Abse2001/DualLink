@@ -117,6 +117,12 @@ public sealed class NetworkService
     public async Task RemoveBondingRoutesAsync() => await RunPowerShellAsync(
         "$alias='DualLink Bond'; Remove-NetRoute -DestinationPrefix @('0.0.0.0/1','128.0.0.0/1') -InterfaceAlias $alias -Confirm:$false -ErrorAction SilentlyContinue");
 
+    public async Task RemoveBondingEndpointRoutesAsync(IEnumerable<AdapterInfo> adapters, IPAddress endpoint)
+    {
+        foreach (var adapter in adapters)
+            await RunPowerShellAsync($"Remove-NetRoute -DestinationPrefix '{endpoint}/32' -InterfaceIndex {adapter.InterfaceIndex} -AddressFamily IPv4 -Confirm:$false -ErrorAction SilentlyContinue");
+    }
+
     private static async Task EnsureHostRouteAsync(string destination, AdapterInfo adapter, int metric)
     {
         if (adapter.Gateway is null) return;
