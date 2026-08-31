@@ -10,6 +10,20 @@ public partial class App : System.Windows.Application
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+        if (e.Args.Contains("--wintun-smoke", StringComparer.OrdinalIgnoreCase))
+        {
+            try
+            {
+                using var device = new WintunDevice("DualLink CI Smoke");
+                Shutdown(0);
+            }
+            catch (Exception error)
+            {
+                AppLog.Write($"Wintun smoke test failed: {error}");
+                Shutdown(1);
+            }
+            return;
+        }
         _window = new MainWindow();
         _window.Show();
         _tray = new System.Windows.Forms.NotifyIcon
