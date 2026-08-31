@@ -1,0 +1,30 @@
+[Unit]
+Description=DualLink multipath bonding relay
+After=network-online.target nftables.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=duallink
+Group=duallink
+EnvironmentFile=/etc/duallink/relay.env
+ExecStart=/opt/duallink-relay/DualLink.Relay
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+DevicePolicy=closed
+DeviceAllow=/dev/net/tun rw
+
+[Install]
+WantedBy=multi-user.target
