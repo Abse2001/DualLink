@@ -23,6 +23,8 @@ jobs:
         run: dotnet restore DualLink.sln
       - name: Test
         run: dotnet test DualLink.sln --configuration Release --no-restore
+      - name: Build Windows application
+        run: dotnet build src/DualLink.App/DualLink.App.csproj --configuration Release --no-restore
       - name: Publish self-contained app
         run: dotnet publish src/DualLink.App/DualLink.App.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish
       - name: Download official Wintun
