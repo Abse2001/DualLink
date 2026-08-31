@@ -48,6 +48,7 @@ public sealed class DualPathBondingClient : IAsyncDisposable
     private readonly Dictionary<string, BondingPathTransport> _paths;
     private readonly AdaptiveBondingScheduler _scheduler = new();
     private readonly ReplayWindow _downlinkReplay = new();
+    private readonly PacketReorderBuffer _downlinkOrder = new(TimeSpan.FromMilliseconds(150));
     private readonly CancellationTokenSource _shutdown = new();
     private readonly List<Task> _receiveTasks = [];
     private long _nextSequence;
@@ -143,11 +144,19 @@ public sealed class DualPathBondingClient : IAsyncDisposable
 
             if (!BondingPacketCodec.TryDecode(buffer.AsSpan(0, length), _key, out var packet) || packet is null) continue;
             if (packet.Direction != BondingDirection.Downlink || packet.SessionId != _sessionId) continue;
+            IReadOnlyList<ReadOnlyMemory<byte>> ordered;
             lock (_downlinkReplay)
+            {
                 if (!_downlinkReplay.TryAccept(packet.Sequence)) continue;
+                ordered = _downlinkOrder.Add(
+                    packet.Sequence,
+                    packet.Kind == BondingPacketKind.Data ? packet.Payload : ReadOnlyMemory<byte>.Empty,
+                    DateTimeOffset.UtcNow);
+            }
 
-            if (packet.Kind == BondingPacketKind.Data && PacketReceived is { } callback)
-                await callback(packet.Payload);
+            if (PacketReceived is { } callback)
+                foreach (var innerPacket in ordered)
+                    if (!innerPacket.IsEmpty) await callback(innerPacket);
         }
     }
 
