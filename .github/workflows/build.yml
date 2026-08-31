@@ -43,3 +43,23 @@ jobs:
         with:
           files: artifacts/DualLink-Setup-x64.exe
           generate_release_notes: true
+  relay:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '8.0.x'
+      - name: Test shared protocol
+        run: dotnet test tests/DualLink.Tests/DualLink.Tests.csproj -c Release
+      - name: Publish Linux relay
+        run: dotnet publish src/DualLink.Relay/DualLink.Relay.csproj -c Release -r linux-x64 --self-contained true -p:PublishSingleFile=true -o relay-package
+      - name: Add deployment files
+        run: |
+          cp deploy/linux/install-relay.sh relay-package/
+          cp deploy/linux/duallink-relay.service relay-package/
+          chmod +x relay-package/install-relay.sh relay-package/DualLink.Relay
+      - uses: actions/upload-artifact@v5
+        with:
+          name: DualLink-Relay-linux-x64
+          path: relay-package/
