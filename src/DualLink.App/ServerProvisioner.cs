@@ -34,7 +34,11 @@ internal sealed class ServerProvisioner
             await RunAsync(scp, uploadArguments, token);
 
             progress.Report("Installing and starting the encrypted relay…");
-            const string install = "sudo bash /tmp/duallink-install/install-relay.sh /tmp/duallink-install/DualLink.Relay && " +
+            // GitHub Actions builds the installer on Windows, so deployment text files can
+            // acquire CRLF endings. Strip only a trailing carriage return on the relay before
+            // Bash/systemd read them. This also makes upgrades from affected packages safe.
+            const string install = "sed -i 's/\\r$//' /tmp/duallink-install/install-relay.sh /tmp/duallink-install/duallink-relay.service && " +
+                "sudo bash /tmp/duallink-install/install-relay.sh /tmp/duallink-install/DualLink.Relay && " +
                 "sudo install -o root -g duallink -m 0640 /tmp/duallink-install/relay.env /etc/duallink/relay.env && " +
                 "sudo systemctl restart duallink-relay.service && sudo systemctl is-active duallink-relay.service";
             var result = await RunAsync(ssh, CommonArguments(privateKeyPath, destination).Concat([destination, install]), token);
