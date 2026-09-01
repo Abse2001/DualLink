@@ -165,7 +165,7 @@ public sealed class NetworkService
         await RestoreAutomaticMetricsAsync();
     }
 
-    private static Task<string> RunPowerShellAsync(string command) => RunAsync("powershell.exe", $"-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"{command}\"", CancellationToken.None);
+    private static Task<string> RunPowerShellAsync(string command) => RunAsync("powershell.exe", $"-NoProfile -NonInteractive -Command \"{command}\"", CancellationToken.None);
 
     private static async Task<string> RunAsync(string file, string arguments, CancellationToken token)
     {
