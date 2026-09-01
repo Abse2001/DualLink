@@ -37,12 +37,15 @@ internal sealed class ServerProvisioner
             // GitHub Actions builds the installer on Windows, so deployment text files can
             // acquire CRLF endings. Strip only a trailing carriage return on the relay before
             // Bash/systemd read them. This also makes upgrades from affected packages safe.
-            const string install = "sed -i 's/\\r$//' /tmp/duallink-install/install-relay.sh /tmp/duallink-install/duallink-relay.service && " +
+            const string installSteps = "sed -i 's/\\r$//' /tmp/duallink-install/install-relay.sh /tmp/duallink-install/duallink-relay.service && " +
                 "sudo bash /tmp/duallink-install/install-relay.sh /tmp/duallink-install/DualLink.Relay && " +
                 "sudo install -o root -g duallink -m 0640 /tmp/duallink-install/relay.env /etc/duallink/relay.env && " +
                 "sudo systemctl restart duallink-relay.service && sleep 2 && " +
                 "sudo systemctl is-active duallink-relay.service && " +
                 "sudo ss -lunp | grep -q ':443 '";
+            var install = $"({installSteps}) || {{ rc=$?; echo '--- DualLink relay diagnostics ---'; " +
+                "sudo systemctl status duallink-relay.service --no-pager -l || true; " +
+                "sudo journalctl -u duallink-relay.service -n 40 --no-pager || true; exit $rc; }}";
             var result = await RunAsync(ssh, CommonArguments(privateKeyPath, destination).Concat([destination, install]), token);
             if (!result.Contains("active", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("The relay service did not become active or listen on UDP 443.");
             progress.Report("Relay installed and active.");
@@ -72,7 +75,13 @@ internal sealed class ServerProvisioner
         await process.WaitForExitAsync(token);
         var output = await outputTask;
         var error = await errorTask;
-        if (process.ExitCode != 0) throw new InvalidOperationException(string.IsNullOrWhiteSpace(error) ? $"{Path.GetFileName(executable)} failed with exit code {process.ExitCode}." : error.Trim());
+        if (process.ExitCode != 0)
+        {
+            var details = string.Join(Environment.NewLine, new[] { error.Trim(), output.Trim() }.Where(value => !string.IsNullOrWhiteSpace(value)));
+            throw new InvalidOperationException(string.IsNullOrWhiteSpace(details)
+                ? $"{Path.GetFileName(executable)} failed with exit code {process.ExitCode}."
+                : details);
+        }
         return output;
     }
 }
