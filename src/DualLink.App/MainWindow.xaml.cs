@@ -26,6 +26,7 @@ public partial class MainWindow : Window
     private System.Net.IPAddress? _wireGuardEndpoint;
     private string? _endpointRouteSignature;
     private BondingEngine? _bonding;
+    private CancellationTokenSource? _serverSetupCancellation;
     private IReadOnlyCollection<BondingPathSample> _bondingSamples = [];
 
     public MainWindow()
@@ -44,6 +45,14 @@ public partial class MainWindow : Window
 
     private async void SetupServer_Click(object sender, RoutedEventArgs e)
     {
+        if (_serverSetupCancellation is not null)
+        {
+            ServerSetupProgressText.Text = "Cancelling server setup…";
+            ServerSetupButton.IsEnabled = false;
+            _serverSetupCancellation.Cancel();
+            return;
+        }
+
         try
         {
             if (!IPAddress.TryParse(RelayAddressText.Text.Trim(), out var relay) || relay.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork)
@@ -52,8 +61,8 @@ public partial class MainWindow : Window
             if (dialog.ShowDialog(this) != true) return;
 
             var key = RandomNumberGenerator.GetBytes(32);
-            ServerSetupButton.IsEnabled = false;
-            ServerSetupButton.Content = "Setting up…";
+            _serverSetupCancellation = CancellationTokenSource.CreateLinkedTokenSource(_stop.Token);
+            ServerSetupButton.Content = "Cancel setup";
             BondingToggleButton.IsEnabled = false;
             RelayAddressText.IsEnabled = false;
             ServerSetupProgressPanel.Visibility = Visibility.Visible;
@@ -64,12 +73,17 @@ public partial class MainWindow : Window
                 ServerSetupProgressText.Text = message;
                 StatusText.Text = message;
             });
-            await _serverProvisioner.ProvisionAsync(relay, dialog.FileName, key, progress, _stop.Token);
+            await _serverProvisioner.ProvisionAsync(relay, dialog.FileName, key, progress, _serverSetupCancellation.Token);
             RelayKeyBox.Password = Convert.ToBase64String(key);
             BondingSettingsStore.Save(relay.ToString(), key);
             StatusText.Text = "Relay installed and ready; press Start bonding";
             VpnText.Text = "The bonding key is encrypted for your Windows user with DPAPI.";
             AppLog.Write($"Relay provisioned at {relay}");
+        }
+        catch (OperationCanceledException) when (!_stop.IsCancellationRequested)
+        {
+            StatusText.Text = "Server setup cancelled. No bonding routes were changed.";
+            AppLog.Write("Relay setup cancelled by user.");
         }
         catch (Exception ex)
         {
@@ -78,6 +92,8 @@ public partial class MainWindow : Window
         }
         finally
         {
+            _serverSetupCancellation?.Dispose();
+            _serverSetupCancellation = null;
             ServerSetupButton.IsEnabled = true;
             ServerSetupButton.Content = "Setup server";
             BondingToggleButton.IsEnabled = true;
