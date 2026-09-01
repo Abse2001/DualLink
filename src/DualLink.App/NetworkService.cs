@@ -87,6 +87,17 @@ public sealed class NetworkService
         catch { return false; }
     }
 
+    public async Task<double?> MeasureBondedInternetLatencyAsync(CancellationToken token)
+    {
+        try
+        {
+            var result = await RunAsync("ping.exe", "-4 -n 1 -w 1500 1.1.1.1", token);
+            var match = Regex.Match(result, @"time[=<](\d+)ms", RegexOptions.IgnoreCase);
+            return match.Success ? double.Parse(match.Groups[1].Value) : null;
+        }
+        catch { return null; }
+    }
+
     public async Task ApplyMetricsAsync(IEnumerable<AdapterInfo> adapters, string preferredId, int preferredMetric, int backupMetric)
     {
         foreach (var adapter in adapters)
