@@ -12,7 +12,8 @@ internal sealed class LinuxTunDevice : IDisposable
     private const short IFF_TUN = 0x0001;
     private const short IFF_NO_PI = 0x1000;
     private const int IfReqSize = 40;
-    private readonly FileStream _stream;
+    private readonly FileStream _readStream;
+    private readonly FileStream _writeStream;
 
     public LinuxTunDevice(string name)
     {
@@ -43,16 +44,28 @@ internal sealed class LinuxTunDevice : IDisposable
             Marshal.FreeHGlobal(request);
         }
 
-        // SafeFileHandle instances created from a native Unix fd are synchronous in .NET.
-        // FileStream still exposes ReadAsync/WriteAsync using async-over-sync without
-        // incorrectly treating this descriptor as Windows-style overlapped I/O.
-        _stream = new FileStream(handle, FileAccess.ReadWrite, 64 * 1024, isAsync: false);
+        var writeFd = dup(fd);
+        if (writeFd < 0)
+        {
+            handle.Dispose();
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Unable to duplicate TUN descriptor");
+        }
+
+        // Separate FileStream instances are required for full duplex. A synchronous
+        // blocking read and a write on the same FileStream are serialized internally.
+        _readStream = new FileStream(handle, FileAccess.Read, 64 * 1024, isAsync: false);
+        _writeStream = new FileStream(new SafeFileHandle((IntPtr)writeFd, ownsHandle: true), FileAccess.Write, 64 * 1024, isAsync: false);
     }
 
-    public ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken token) => _stream.ReadAsync(buffer, token);
-    public ValueTask WriteAsync(ReadOnlyMemory<byte> packet, CancellationToken token) => _stream.WriteAsync(packet, token);
-    public void Dispose() => _stream.Dispose();
+    public ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken token) => _readStream.ReadAsync(buffer, token);
+    public ValueTask WriteAsync(ReadOnlyMemory<byte> packet, CancellationToken token) => _writeStream.WriteAsync(packet, token);
+    public void Dispose()
+    {
+        _readStream.Dispose();
+        _writeStream.Dispose();
+    }
 
     [DllImport("libc", SetLastError = true)] private static extern int open(string path, int flags);
+    [DllImport("libc", SetLastError = true)] private static extern int dup(int oldfd);
     [DllImport("libc", SetLastError = true)] private static extern int ioctl(int fd, uint request, IntPtr data);
 }
