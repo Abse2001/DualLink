@@ -42,6 +42,8 @@ While bonding is active, DualLink shows direct Internet ping, encrypted relay RT
 
 Download `DualLink-Setup-x64.exe` from the latest private repository release. The stable installer application ID upgrades an existing installation in place; uninstalling the previous version is not required.
 
+Every release also includes `SHA256SUMS.txt`. Compare its installer hash with `Get-FileHash DualLink-Setup-x64.exe -Algorithm SHA256` before running the installer. DualLink no longer invokes PowerShell with an execution-policy bypass.
+
 Administrator permission is required to create Wintun and change routes. **Restore Windows defaults** removes DualLink-managed tunnel routes and restores automatic interface metrics.
 
 Logs: `%LOCALAPPDATA%\DualLink\duallink.log`
