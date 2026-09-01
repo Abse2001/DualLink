@@ -4,6 +4,8 @@ using System.Windows.Media;
 using System.Net;
 using System.Windows.Controls;
 using System.Security.Cryptography;
+using System.Windows.Shapes;
+using System.Windows.Threading;
 using DualLink.Core;
 using MediaBrushes = System.Windows.Media.Brushes;
 using MediaColor = System.Windows.Media.Color;
@@ -30,11 +32,20 @@ public partial class MainWindow : Window
     private IReadOnlyCollection<BondingPathSample> _bondingSamples = [];
     private Dictionary<string, BondingPathTraffic> _previousTraffic = new(StringComparer.OrdinalIgnoreCase);
     private DateTimeOffset _previousTrafficAt = DateTimeOffset.UtcNow;
+    private readonly List<ConnectionHistorySample> _historySamples = [];
+    private readonly List<ConnectionHistoryEvent> _historyEvents = [];
+    private readonly ObservableCollection<HistoryEventRow> _historyEventRows = [];
+    private readonly Dictionary<string, bool> _historyState = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, DateTimeOffset> _outageStarted = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> _knownConnectionTypes = new(StringComparer.OrdinalIgnoreCase);
+    private DateTimeOffset _lastHistorySave = DateTimeOffset.MinValue;
 
     public MainWindow()
     {
         InitializeComponent();
         AdapterGrid.ItemsSource = _rows;
+        HistoryEventGrid.ItemsSource = _historyEventRows;
+        LoadConnectionHistory();
         _controller = new FailoverController(_settings);
         _wireGuardEndpoint = _wireGuardConfig.LoadEndpoint();
         if (BondingSettingsStore.Load() is { } saved)
@@ -168,6 +179,7 @@ public partial class MainWindow : Window
                     0,
                     Math.Clamp(1 - probe.PacketLossPercent / 100d, 0, 1));
             }).ToArray();
+            RecordConnectionHistory(adapters, probes);
             ActiveText.Text = decision.ActiveAdapterId is null ? "" : $"Active: {adapters.FirstOrDefault(x => x.Id == decision.ActiveAdapterId)?.Name}";
             StatusText.Text = decision.Reason;
             VpnText.Text = ProtonModeCheck.IsChecked == true
@@ -305,6 +317,132 @@ public partial class MainWindow : Window
 
     private sealed record TrafficDisplay(string Upload, string Download);
 
+    private void LoadConnectionHistory()
+    {
+        var data = ConnectionHistoryStore.Load();
+        var cutoff = DateTimeOffset.UtcNow.AddHours(-24);
+        _historySamples.AddRange(data.Samples.Where(x => x.Timestamp >= cutoff));
+        _historyEvents.AddRange(data.Events.Where(x => x.Timestamp >= cutoff));
+        foreach (var sample in _historySamples)
+            _knownConnectionTypes[sample.Connection] = sample.Type;
+        RebuildHistoryEventRows();
+    }
+
+    private void RecordConnectionHistory(IReadOnlyList<AdapterInfo> adapters, IReadOnlyCollection<ProbeResult> probes)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var current = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var adapter in adapters)
+        {
+            current.Add(adapter.Name);
+            var type = FriendlyType(adapter);
+            _knownConnectionTypes[adapter.Name] = type;
+            var probe = probes.First(x => x.AdapterId == adapter.Id);
+            AddHistorySample(now, adapter.Name, type, probe.Online, probe.Score, probe.LatencyMs);
+        }
+
+        foreach (var known in _knownConnectionTypes.Where(x => !current.Contains(x.Key)).ToArray())
+            AddHistorySample(now, known.Key, known.Value, false, 0, 0);
+
+        var cutoff = now.AddHours(-24);
+        _historySamples.RemoveAll(x => x.Timestamp < cutoff);
+        _historyEvents.RemoveAll(x => x.Timestamp < cutoff);
+        RebuildHistoryEventRows();
+        DrawHistoryChart();
+        if (now - _lastHistorySave >= TimeSpan.FromSeconds(10))
+        {
+            ConnectionHistoryStore.Save(new(_historySamples, _historyEvents));
+            _lastHistorySave = now;
+        }
+    }
+
+    private void AddHistorySample(DateTimeOffset now, string connection, string type, bool online, double quality, double latency)
+    {
+        _historySamples.Add(new(now, connection, type, online, online ? quality : 0, online ? latency : 0));
+        if (_historyState.TryGetValue(connection, out var previous) && previous != online)
+        {
+            if (!online)
+            {
+                _outageStarted[connection] = now;
+                _historyEvents.Add(new(now, connection, "Connection dropped", null));
+            }
+            else
+            {
+                var duration = _outageStarted.Remove(connection, out var started) ? (now - started).TotalSeconds : (double?)null;
+                _historyEvents.Add(new(now, connection, "Connection recovered", duration));
+            }
+        }
+        _historyState[connection] = online;
+    }
+
+    private void RebuildHistoryEventRows()
+    {
+        _historyEventRows.Clear();
+        foreach (var item in _historyEvents.OrderByDescending(x => x.Timestamp).Take(250))
+            _historyEventRows.Add(new(item.Timestamp.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss"), item.Connection,
+                item.Event, item.DurationSeconds is { } seconds ? FormatDuration(seconds) : "—"));
+    }
+
+    private static string FormatDuration(double seconds) => seconds < 60 ? $"{seconds:0} sec" : $"{TimeSpan.FromSeconds(seconds):m\\:ss}";
+
+    private void DrawHistoryChart()
+    {
+        if (HistoryCanvas is null) return;
+        HistoryCanvas.Children.Clear();
+        var width = HistoryCanvas.ActualWidth;
+        var height = HistoryCanvas.ActualHeight;
+        if (width < 80 || height < 80) return;
+        var end = DateTimeOffset.UtcNow;
+        var start = end.AddMinutes(-15);
+        var samples = _historySamples.Where(x => x.Timestamp >= start).ToArray();
+        HistoryEmptyText.Visibility = samples.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+        if (samples.Length == 0) return;
+
+        const double left = 42, top = 18, right = 14, bottom = 30;
+        var plotWidth = width - left - right;
+        var plotHeight = height - top - bottom;
+        for (var quality = 0; quality <= 100; quality += 25)
+        {
+            var y = top + plotHeight * (1 - quality / 100d);
+            HistoryCanvas.Children.Add(new Line { X1 = left, X2 = left + plotWidth, Y1 = y, Y2 = y, Stroke = new SolidColorBrush(MediaColor.FromRgb(51, 65, 85)), StrokeThickness = 1 });
+            var label = new TextBlock { Text = quality.ToString(), Foreground = new SolidColorBrush(MediaColor.FromRgb(148, 163, 184)), FontSize = 11 };
+            Canvas.SetLeft(label, 5); Canvas.SetTop(label, y - 8); HistoryCanvas.Children.Add(label);
+        }
+
+        MediaColor[] colors = [MediaColor.FromRgb(56, 189, 248), MediaColor.FromRgb(74, 222, 128), MediaColor.FromRgb(250, 204, 21), MediaColor.FromRgb(192, 132, 252)];
+        var colorIndex = 0;
+        foreach (var group in samples.GroupBy(x => x.Connection).OrderBy(x => x.Key))
+        {
+            var color = colors[colorIndex++ % colors.Length];
+            var points = new PointCollection(group.OrderBy(x => x.Timestamp).Select(sample => new Point(
+                left + plotWidth * Math.Clamp((sample.Timestamp - start).TotalSeconds / (end - start).TotalSeconds, 0, 1),
+                top + plotHeight * (1 - Math.Clamp(sample.Quality, 0, 100) / 100d))));
+            HistoryCanvas.Children.Add(new Polyline { Points = points, Stroke = new SolidColorBrush(color), StrokeThickness = 2 });
+            var legend = new TextBlock { Text = group.Key, Foreground = new SolidColorBrush(color), FontWeight = FontWeights.SemiBold, FontSize = 12 };
+            Canvas.SetLeft(legend, left + (colorIndex - 1) * 130); Canvas.SetTop(legend, height - 22); HistoryCanvas.Children.Add(legend);
+        }
+
+        foreach (var drop in _historyEvents.Where(x => x.Timestamp >= start && x.Event == "Connection dropped"))
+        {
+            var x = left + plotWidth * Math.Clamp((drop.Timestamp - start).TotalSeconds / (end - start).TotalSeconds, 0, 1);
+            HistoryCanvas.Children.Add(new Line { X1 = x, X2 = x, Y1 = top, Y2 = top + plotHeight, Stroke = MediaBrushes.Red, StrokeThickness = 2, StrokeDashArray = new DoubleCollection([4, 3]), ToolTip = $"{drop.Connection} dropped at {drop.Timestamp.ToLocalTime():HH:mm:ss}" });
+        }
+    }
+
+    private void HistoryCanvas_SizeChanged(object sender, SizeChangedEventArgs e) => DrawHistoryChart();
+
+    private void ClearHistory_Click(object sender, RoutedEventArgs e)
+    {
+        _historySamples.Clear();
+        _historyEvents.Clear();
+        _historyState.Clear();
+        _outageStarted.Clear();
+        _knownConnectionTypes.Clear();
+        RebuildHistoryEventRows();
+        DrawHistoryChart();
+        ConnectionHistoryStore.Save(new([], []));
+    }
+
     private FailoverDecision ChooseConnection(IReadOnlyCollection<ProbeResult> probes)
     {
         if (_selectedPreferenceId is null) return _controller.Evaluate(probes);
@@ -406,6 +544,7 @@ public partial class MainWindow : Window
     protected override void OnClosed(EventArgs e)
     {
         _stop.Cancel();
+        ConnectionHistoryStore.Save(new(_historySamples, _historyEvents));
         if (_bonding is not null) StopBondingAsync().GetAwaiter().GetResult();
         base.OnClosed(e);
     }
@@ -428,3 +567,4 @@ public sealed record AdapterRow(string Name, string Type, string Address, string
 }
 
 public sealed record AdapterChoice(string? Id, string DisplayName);
+public sealed record HistoryEventRow(string Time, string Connection, string Event, string Duration);
