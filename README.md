@@ -30,6 +30,10 @@ The private SSH key is used only by the local Windows OpenSSH client. DualLink d
 
 When bonding is stopped, DualLink can continue monitoring physical connections and managing ordinary Windows route metrics. **Prepare Proton config** remains available for the earlier Proton/WireGuard failover setup. Proton is optional and is not used as the bonding relay.
 
+## Connection history
+
+The **Connection history** tab keeps a rolling quality chart for Ethernet, Wi-Fi, and USB tethering. It marks connection drops in red and records recovery times and outage durations. Up to 24 hours of history is stored locally and remains available after restarting DualLink.
+
 ## Install and update
 
 Download `DualLink-Setup-x64.exe` from the latest private repository release. The stable installer application ID upgrades an existing installation in place; uninstalling the previous version is not required.
