@@ -4,6 +4,21 @@ using System.Net.Sockets;
 using DualLink.Core;
 using DualLink.Relay;
 
+if (args.Contains("--tun-smoke", StringComparer.OrdinalIgnoreCase))
+{
+    using var smokeTun = new LinuxTunDevice("dlbond0");
+    await RelayNetwork.ConfigureAsync(CancellationToken.None);
+    _ = Task.Run(async () => await smokeTun.ReadAsync(new byte[2048], CancellationToken.None));
+    await Task.Delay(100);
+    // A minimal IPv4 header is sufficient to prove a write can complete while the
+    // independent read descriptor is blocked waiting for an outbound kernel packet.
+    byte[] packet = [0x45, 0, 0, 20, 0, 0, 0, 0, 64, 59, 0, 0, 10, 77, 0, 2, 10, 77, 0, 1];
+    using var smokeDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+    await smokeTun.WriteAsync(packet, smokeDeadline.Token);
+    Console.WriteLine("DualLink TUN full-duplex smoke test passed.");
+    Environment.Exit(0);
+}
+
 var keyText = Environment.GetEnvironmentVariable("DUALLINK_KEY");
 if (string.IsNullOrWhiteSpace(keyText)) throw new InvalidOperationException("DUALLINK_KEY is required.");
 var key = Convert.FromBase64String(keyText);
