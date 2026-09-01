@@ -31,8 +31,8 @@ public partial class MainWindow : Window
     private BondingEngine? _bonding;
     private CancellationTokenSource? _serverSetupCancellation;
     private IReadOnlyCollection<BondingPathSample> _bondingSamples = [];
-    private Dictionary<string, BondingPathTraffic> _previousTraffic = new(StringComparer.OrdinalIgnoreCase);
-    private DateTimeOffset _previousTrafficAt = DateTimeOffset.UtcNow;
+    private Dictionary<string, AdapterByteCounters> _previousAdapterCounters = new(StringComparer.OrdinalIgnoreCase);
+    private DateTimeOffset _previousAdapterCountersAt = DateTimeOffset.UtcNow;
     private DateTimeOffset _lastTunnelLatencyProbe = DateTimeOffset.MinValue;
     private double? _bondedInternetLatency;
     private readonly List<ConnectionHistorySample> _historySamples = [];
@@ -161,7 +161,7 @@ public partial class MainWindow : Window
             }
 
             _rows.Clear();
-            var traffic = BuildTrafficDisplays();
+            var traffic = BuildTrafficDisplays(adapters);
             var relayTelemetry = _bonding?.GetPathTelemetry().ToDictionary(x => x.PathId, StringComparer.OrdinalIgnoreCase)
                 ?? new Dictionary<string, BondingPathSample>(StringComparer.OrdinalIgnoreCase);
             if (_bonding is not null && DateTimeOffset.UtcNow - _lastTunnelLatencyProbe >= TimeSpan.FromSeconds(2))
@@ -172,7 +172,7 @@ public partial class MainWindow : Window
             foreach (var adapter in adapters)
             {
                 var probe = probes.First(x => x.AdapterId == adapter.Id);
-                traffic.TryGetValue(adapter.Name, out var pathTraffic);
+                traffic.TryGetValue(adapter.Id, out var pathTraffic);
                 relayTelemetry.TryGetValue(adapter.Name, out var relaySample);
                 _rows.Add(AdapterRow.From(adapter, probe, decision.ActiveAdapterId == adapter.Id,
                     pathTraffic?.Upload ?? "—", pathTraffic?.Download ?? "—",
@@ -192,7 +192,7 @@ public partial class MainWindow : Window
                     Math.Clamp(1 - probe.PacketLossPercent / 100d, 0, 1));
             }).ToArray();
             UpdateRelayLatencyStatus(relayTelemetry.Values);
-            RecordConnectionHistory(adapters, probes);
+            RecordConnectionHistory(adapters, probes, traffic);
             ActiveText.Text = decision.ActiveAdapterId is null ? "" : $"Active: {adapters.FirstOrDefault(x => x.Id == decision.ActiveAdapterId)?.Name}";
             StatusText.Text = decision.Reason;
             VpnText.Text = ProtonModeCheck.IsChecked == true
@@ -282,30 +282,30 @@ public partial class MainWindow : Window
             await _network.RemoveBondingEndpointRoutesAsync(_network.GetInternetAdapters(), relay);
         BondingToggleButton.Content = "Start bonding";
         SetBondingState("Bonding: Stopped", MediaColor.FromRgb(203, 213, 225));
-        _previousTraffic.Clear();
         _bondedInternetLatency = null;
         UpdateRelayLatencyStatus([]);
         StatusText.Text = "Bonding stopped; existing failover monitoring remains active";
         AppLog.Write("Bonding stopped");
     }
 
-    private Dictionary<string, TrafficDisplay> BuildTrafficDisplays()
+    private Dictionary<string, TrafficDisplay> BuildTrafficDisplays(IReadOnlyList<AdapterInfo> adapters)
     {
-        if (_bonding is null) return new(StringComparer.OrdinalIgnoreCase);
         var now = DateTimeOffset.UtcNow;
-        var elapsed = Math.Max(0.001, (now - _previousTrafficAt).TotalSeconds);
-        var current = _bonding.GetTraffic().ToDictionary(item => item.PathName, StringComparer.OrdinalIgnoreCase);
+        var elapsed = Math.Max(0.001, (now - _previousAdapterCountersAt).TotalSeconds);
+        var current = _network.GetAdapterByteCounters();
         var display = new Dictionary<string, TrafficDisplay>(StringComparer.OrdinalIgnoreCase);
-        foreach (var item in current.Values)
+        foreach (var adapter in adapters)
         {
-            _previousTraffic.TryGetValue(item.PathName, out var previous);
-            var uploadRate = Math.Max(0, item.UploadedBytes - (previous?.UploadedBytes ?? item.UploadedBytes)) * 8d / elapsed / 1_000_000d;
-            var downloadRate = Math.Max(0, item.DownloadedBytes - (previous?.DownloadedBytes ?? item.DownloadedBytes)) * 8d / elapsed / 1_000_000d;
-            display[item.PathName] = new($"{uploadRate:0.00} Mbps · {FormatBytes(item.UploadedBytes)}",
-                $"{downloadRate:0.00} Mbps · {FormatBytes(item.DownloadedBytes)}");
+            if (!current.TryGetValue(adapter.Id, out var counter)) continue;
+            _previousAdapterCounters.TryGetValue(adapter.Id, out var previous);
+            var uploadRate = Math.Max(0, counter.BytesSent - (previous?.BytesSent ?? counter.BytesSent)) * 8d / elapsed / 1_000_000d;
+            var downloadRate = Math.Max(0, counter.BytesReceived - (previous?.BytesReceived ?? counter.BytesReceived)) * 8d / elapsed / 1_000_000d;
+            display[adapter.Id] = new(uploadRate, downloadRate,
+                $"{uploadRate:0.00} Mbps · {FormatBytes(counter.BytesSent)}",
+                $"{downloadRate:0.00} Mbps · {FormatBytes(counter.BytesReceived)}");
         }
-        _previousTraffic = current;
-        _previousTrafficAt = now;
+        _previousAdapterCounters = current.ToDictionary(x => x.Key, x => x.Value, StringComparer.OrdinalIgnoreCase);
+        _previousAdapterCountersAt = now;
         return display;
     }
 
@@ -346,7 +346,7 @@ public partial class MainWindow : Window
         RelayLatencyText.Foreground = new SolidColorBrush(best < 80 ? MediaColor.FromRgb(74, 222, 128) : best < 140 ? MediaColor.FromRgb(253, 230, 138) : MediaColor.FromRgb(248, 113, 113));
     }
 
-    private sealed record TrafficDisplay(string Upload, string Download);
+    private sealed record TrafficDisplay(double UploadMbps, double DownloadMbps, string Upload, string Download);
 
     private void LoadConnectionHistory()
     {
@@ -359,7 +359,8 @@ public partial class MainWindow : Window
         RebuildHistoryEventRows();
     }
 
-    private void RecordConnectionHistory(IReadOnlyList<AdapterInfo> adapters, IReadOnlyCollection<ProbeResult> probes)
+    private void RecordConnectionHistory(IReadOnlyList<AdapterInfo> adapters, IReadOnlyCollection<ProbeResult> probes,
+        IReadOnlyDictionary<string, TrafficDisplay> traffic)
     {
         var now = DateTimeOffset.UtcNow;
         var current = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -369,11 +370,13 @@ public partial class MainWindow : Window
             var type = FriendlyType(adapter);
             _knownConnectionTypes[adapter.Name] = type;
             var probe = probes.First(x => x.AdapterId == adapter.Id);
-            AddHistorySample(now, adapter.Name, type, probe.Online, probe.Score, probe.LatencyMs);
+            traffic.TryGetValue(adapter.Id, out var rates);
+            AddHistorySample(now, adapter.Name, type, probe.Online, probe.Score, probe.LatencyMs,
+                rates?.DownloadMbps ?? 0, rates?.UploadMbps ?? 0);
         }
 
         foreach (var known in _knownConnectionTypes.Where(x => !current.Contains(x.Key)).ToArray())
-            AddHistorySample(now, known.Key, known.Value, false, 0, 0);
+            AddHistorySample(now, known.Key, known.Value, false, 0, 0, 0, 0);
 
         var cutoff = now.AddHours(-24);
         _historySamples.RemoveAll(x => x.Timestamp < cutoff);
@@ -387,9 +390,11 @@ public partial class MainWindow : Window
         }
     }
 
-    private void AddHistorySample(DateTimeOffset now, string connection, string type, bool online, double quality, double latency)
+    private void AddHistorySample(DateTimeOffset now, string connection, string type, bool online, double quality,
+        double latency, double downloadMbps, double uploadMbps)
     {
-        _historySamples.Add(new(now, connection, type, online, online ? quality : 0, online ? latency : 0));
+        _historySamples.Add(new(now, connection, type, online, online ? quality : 0, online ? latency : 0,
+            online ? downloadMbps : 0, online ? uploadMbps : 0));
         if (_historyState.TryGetValue(connection, out var previous) && previous != online)
         {
             if (!online)
@@ -424,7 +429,14 @@ public partial class MainWindow : Window
         var height = HistoryCanvas.ActualHeight;
         if (width < 80 || height < 80) return;
         var end = DateTimeOffset.UtcNow;
-        var start = end.AddMinutes(-15);
+        var rangeMinutes = (HistoryRangeCombo?.SelectedItem as ComboBoxItem)?.Tag?.ToString() switch
+        {
+            "30" => 30,
+            "60" => 60,
+            _ => 15
+        };
+        var metric = (HistoryMetricCombo?.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "Quality";
+        var start = end.AddMinutes(-rangeMinutes);
         var samples = _historySamples.Where(x => x.Timestamp >= start).ToArray();
         HistoryEmptyText.Visibility = samples.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
         if (samples.Length == 0) return;
@@ -432,11 +444,35 @@ public partial class MainWindow : Window
         const double left = 42, top = 18, right = 14, bottom = 30;
         var plotWidth = width - left - right;
         var plotHeight = height - top - bottom;
-        for (var quality = 0; quality <= 100; quality += 25)
+        Func<ConnectionHistorySample, double> selector = metric switch
         {
-            var y = top + plotHeight * (1 - quality / 100d);
+            "Ping" => sample => sample.Online ? sample.LatencyMs : 0,
+            "Download" => sample => sample.DownloadMbps,
+            "Upload" => sample => sample.UploadMbps,
+            _ => sample => sample.Quality
+        };
+        var maximum = metric == "Quality" ? 100d : NiceMaximum(samples.Where(x => x.Online).Select(selector).DefaultIfEmpty(0).Max());
+        HistoryChartTitle.Text = metric switch
+        {
+            "Ping" => "Ping history",
+            "Download" => "Download history",
+            "Upload" => "Upload history",
+            _ => "Connection quality"
+        };
+        HistoryChartDescription.Text = metric switch
+        {
+            "Ping" => "Round-trip latency per adapter. Lower is better.",
+            "Download" => "Receive traffic per physical adapter, including direct mode.",
+            "Upload" => "Transmit traffic per physical adapter, including direct mode.",
+            _ => "Health score: 100 is excellent and 0 is unusable; based on ping, jitter, loss, and reliability."
+        };
+        HistoryAxisText.Text = metric switch { "Ping" => "ms", "Download" or "Upload" => "Mbps", _ => "Score (0–100)" };
+        for (var tick = 0; tick <= 4; tick++)
+        {
+            var value = maximum * tick / 4d;
+            var y = top + plotHeight * (1 - value / maximum);
             HistoryCanvas.Children.Add(new Line { X1 = left, X2 = left + plotWidth, Y1 = y, Y2 = y, Stroke = new SolidColorBrush(MediaColor.FromRgb(51, 65, 85)), StrokeThickness = 1 });
-            var label = new TextBlock { Text = quality.ToString(), Foreground = new SolidColorBrush(MediaColor.FromRgb(148, 163, 184)), FontSize = 11 };
+            var label = new TextBlock { Text = value.ToString(maximum <= 10 ? "0.0" : "0"), Foreground = new SolidColorBrush(MediaColor.FromRgb(148, 163, 184)), FontSize = 11 };
             Canvas.SetLeft(label, 5); Canvas.SetTop(label, y - 8); HistoryCanvas.Children.Add(label);
         }
 
@@ -449,7 +485,7 @@ public partial class MainWindow : Window
             foreach (var sample in group.OrderBy(x => x.Timestamp))
                 points.Add(new WpfPoint(
                     left + plotWidth * Math.Clamp((sample.Timestamp - start).TotalSeconds / (end - start).TotalSeconds, 0, 1),
-                    top + plotHeight * (1 - Math.Clamp(sample.Quality, 0, 100) / 100d)));
+                    top + plotHeight * (1 - Math.Clamp(selector(sample), 0, maximum) / maximum)));
             HistoryCanvas.Children.Add(new Polyline { Points = points, Stroke = new SolidColorBrush(color), StrokeThickness = 2 });
             var legend = new TextBlock { Text = group.Key, Foreground = new SolidColorBrush(color), FontWeight = FontWeights.SemiBold, FontSize = 12 };
             Canvas.SetLeft(legend, left + (colorIndex - 1) * 130); Canvas.SetTop(legend, height - 22); HistoryCanvas.Children.Add(legend);
@@ -462,7 +498,31 @@ public partial class MainWindow : Window
         }
     }
 
+    private static double NiceMaximum(double value)
+    {
+        if (value <= 0) return 1;
+        var magnitude = Math.Pow(10, Math.Floor(Math.Log10(value)));
+        var normalized = value / magnitude;
+        var nice = normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10;
+        return nice * magnitude;
+    }
+
     private void HistoryCanvas_SizeChanged(object sender, SizeChangedEventArgs e) => DrawHistoryChart();
+
+    private void HistoryChartSelectionChanged(object sender, SelectionChangedEventArgs e) => DrawHistoryChart();
+
+    private void ExportHistory_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new Microsoft.Win32.SaveFileDialog
+        {
+            Filter = "CSV data (*.csv)|*.csv",
+            FileName = $"DualLink-history-{DateTime.Now:yyyyMMdd-HHmm}.csv",
+            Title = "Export DualLink connection history"
+        };
+        if (dialog.ShowDialog(this) != true) return;
+        ConnectionHistoryStore.ExportCsv(dialog.FileName, _historySamples, _historyEvents);
+        StatusText.Text = $"History exported to {System.IO.Path.GetFileName(dialog.FileName)}";
+    }
 
     private void ClearHistory_Click(object sender, RoutedEventArgs e)
     {
