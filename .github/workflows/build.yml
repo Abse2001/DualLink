@@ -71,11 +71,11 @@ jobs:
           name: DualLink-Setup-x64
           path: artifacts/DualLink-Setup-x64.exe
       - name: Publish GitHub release
-        if: startsWith(github.ref, 'refs/tags/v') || (github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, 'Release DualLink 2.0.4'))
+        if: startsWith(github.ref, 'refs/tags/v') || (github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, 'Release DualLink 2.0.5'))
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.0.4
-          name: DualLink 2.0.4 — Cancellable Server Setup
+          tag_name: v2.0.5
+          name: DualLink 2.0.5 — Linux TUN Async Fix
           files: |
             artifacts/DualLink-Setup-x64.exe
             artifacts/DualLink-Relay-linux-x64.zip
@@ -91,6 +91,20 @@ jobs:
         run: dotnet test tests/DualLink.Tests/DualLink.Tests.csproj -c Release
       - name: Publish Linux relay
         run: dotnet publish src/DualLink.Relay/DualLink.Relay.csproj -c Release -r linux-x64 --self-contained true -p:PublishSingleFile=true -o relay-package
+      - name: Smoke-test Linux TUN relay
+        run: |
+          if [ ! -c /dev/net/tun ]; then
+            echo '/dev/net/tun unavailable on runner; skipping runtime smoke test'
+            exit 0
+          fi
+          set +e
+          sudo env DUALLINK_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= DUALLINK_PORT=54443 timeout 5s ./relay-package/DualLink.Relay > relay-smoke.log 2>&1
+          status=$?
+          set -e
+          cat relay-smoke.log
+          sudo ip link delete dlbond0 2>/dev/null || true
+          test "$status" -eq 124
+          grep -q 'DualLink relay listening' relay-smoke.log
       - name: Add deployment files
         run: |
           cp deploy/linux/install-relay.sh relay-package/
