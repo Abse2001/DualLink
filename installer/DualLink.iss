@@ -1,5 +1,5 @@
 #define MyAppName "DualLink"
-#define MyAppVersion "2.0.3"
+#define MyAppVersion "2.0.4"
 #define MyAppPublisher "Abse2001"
 #define MyAppExeName "DualLink.exe"
 
