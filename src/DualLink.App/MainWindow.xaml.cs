@@ -33,6 +33,8 @@ public partial class MainWindow : Window
     private IReadOnlyCollection<BondingPathSample> _bondingSamples = [];
     private Dictionary<string, BondingPathTraffic> _previousTraffic = new(StringComparer.OrdinalIgnoreCase);
     private DateTimeOffset _previousTrafficAt = DateTimeOffset.UtcNow;
+    private DateTimeOffset _lastTunnelLatencyProbe = DateTimeOffset.MinValue;
+    private double? _bondedInternetLatency;
     private readonly List<ConnectionHistorySample> _historySamples = [];
     private readonly List<ConnectionHistoryEvent> _historyEvents = [];
     private readonly ObservableCollection<HistoryEventRow> _historyEventRows = [];
@@ -160,12 +162,21 @@ public partial class MainWindow : Window
 
             _rows.Clear();
             var traffic = BuildTrafficDisplays();
+            var relayTelemetry = _bonding?.GetPathTelemetry().ToDictionary(x => x.PathId, StringComparer.OrdinalIgnoreCase)
+                ?? new Dictionary<string, BondingPathSample>(StringComparer.OrdinalIgnoreCase);
+            if (_bonding is not null && DateTimeOffset.UtcNow - _lastTunnelLatencyProbe >= TimeSpan.FromSeconds(2))
+            {
+                _bondedInternetLatency = await _network.MeasureBondedInternetLatencyAsync(_stop.Token);
+                _lastTunnelLatencyProbe = DateTimeOffset.UtcNow;
+            }
             foreach (var adapter in adapters)
             {
                 var probe = probes.First(x => x.AdapterId == adapter.Id);
                 traffic.TryGetValue(adapter.Name, out var pathTraffic);
+                relayTelemetry.TryGetValue(adapter.Name, out var relaySample);
                 _rows.Add(AdapterRow.From(adapter, probe, decision.ActiveAdapterId == adapter.Id,
-                    pathTraffic?.Upload ?? "—", pathTraffic?.Download ?? "—"));
+                    pathTraffic?.Upload ?? "—", pathTraffic?.Download ?? "—",
+                    relaySample is { SmoothedRttMs: > 0 } ? $"{relaySample.SmoothedRttMs:0} ms" : "—"));
             }
             _bondingSamples = adapters.Select(adapter =>
             {
@@ -180,6 +191,7 @@ public partial class MainWindow : Window
                     0,
                     Math.Clamp(1 - probe.PacketLossPercent / 100d, 0, 1));
             }).ToArray();
+            UpdateRelayLatencyStatus(relayTelemetry.Values);
             RecordConnectionHistory(adapters, probes);
             ActiveText.Text = decision.ActiveAdapterId is null ? "" : $"Active: {adapters.FirstOrDefault(x => x.Id == decision.ActiveAdapterId)?.Name}";
             StatusText.Text = decision.Reason;
@@ -271,6 +283,8 @@ public partial class MainWindow : Window
         BondingToggleButton.Content = "Start bonding";
         SetBondingState("Bonding: Stopped", MediaColor.FromRgb(203, 213, 225));
         _previousTraffic.Clear();
+        _bondedInternetLatency = null;
+        UpdateRelayLatencyStatus([]);
         StatusText.Text = "Bonding stopped; existing failover monitoring remains active";
         AppLog.Write("Bonding stopped");
     }
@@ -314,6 +328,22 @@ public partial class MainWindow : Window
     {
         BondingStateText.Text = text;
         BondingStateText.Foreground = new SolidColorBrush(color);
+    }
+
+    private void UpdateRelayLatencyStatus(IEnumerable<BondingPathSample> samples)
+    {
+        if (_bonding is null)
+        {
+            RelayLatencyText.Text = "Relay latency: Not connected";
+            RelayLatencyText.Foreground = new SolidColorBrush(MediaColor.FromRgb(203, 213, 225));
+            return;
+        }
+        var measured = samples.Where(x => x.SmoothedRttMs > 0).OrderBy(x => x.SmoothedRttMs).ToArray();
+        var pathText = measured.Select(x => $"{x.PathId} {x.SmoothedRttMs:0} ms");
+        var internetText = _bondedInternetLatency is { } latency ? $"Internet {latency:0} ms" : "Internet measuring…";
+        RelayLatencyText.Text = $"Relay: {string.Join(" | ", pathText.Append(internetText))}";
+        var best = measured.Select(x => x.SmoothedRttMs).DefaultIfEmpty(999).Min();
+        RelayLatencyText.Foreground = new SolidColorBrush(best < 80 ? MediaColor.FromRgb(74, 222, 128) : best < 140 ? MediaColor.FromRgb(253, 230, 138) : MediaColor.FromRgb(248, 113, 113));
     }
 
     private sealed record TrafficDisplay(string Upload, string Download);
@@ -553,11 +583,12 @@ public partial class MainWindow : Window
     }
 }
 
-public sealed record AdapterRow(string Name, string Type, string Address, string Latency, string Jitter, string Loss, string Score, string Upload, string Download, string Role)
+public sealed record AdapterRow(string Name, string Type, string Address, string Latency, string RelayLatency, string Jitter, string Loss, string Score, string Upload, string Download, string Role)
 {
-    public static AdapterRow From(AdapterInfo adapter, ProbeResult probe, bool active, string upload = "—", string download = "—") => new(
+    public static AdapterRow From(AdapterInfo adapter, ProbeResult probe, bool active, string upload = "—", string download = "—", string relayLatency = "—") => new(
         adapter.Name, FriendlyType(adapter), adapter.Address?.ToString() ?? "—",
         probe.Online ? $"{probe.LatencyMs:0} ms" : "Offline",
+        relayLatency,
         probe.Online ? $"{probe.JitterMs:0} ms" : "—",
         $"{probe.PacketLossPercent:0}%", $"{probe.Score:0}", upload, download, active ? "Preferred" : "Backup");
 
