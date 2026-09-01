@@ -7,7 +7,9 @@
     <Style TargetType="DataGridCell"><Setter Property="Foreground" Value="#FFFFFF"/><Setter Property="BorderBrush" Value="#334155"/><Setter Property="Padding" Value="8"/></Style>
     <Style TargetType="DataGridRow"><Setter Property="Foreground" Value="#FFFFFF"/><Setter Property="Background" Value="#111C2E"/><Setter Property="BorderBrush" Value="#334155"/><Style.Triggers><Trigger Property="AlternationIndex" Value="1"><Setter Property="Background" Value="#17243A"/></Trigger><Trigger Property="IsSelected" Value="True"><Setter Property="Background" Value="#075985"/><Setter Property="Foreground" Value="#FFFFFF"/></Trigger></Style.Triggers></Style>
   </Window.Resources>
-  <Grid Margin="22">
+  <TabControl Background="#08111F" BorderThickness="0" Foreground="#F8FAFC">
+   <TabItem Header="Dashboard" Background="#132238" Foreground="#F8FAFC">
+    <Grid Margin="22">
     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
     <DockPanel Grid.Row="0" Margin="0,0,0,16">
       <StackPanel DockPanel.Dock="Left"><TextBlock FontSize="32" FontWeight="Bold" Text="DualLink"/><TextBlock Foreground="#CBD5E1" FontSize="14" Text="Bonded Ethernet + Wi-Fi + USB tethering for Windows 11"/></StackPanel>
@@ -70,5 +72,30 @@
     <Border Grid.Row="4" Margin="0,14,0,0" Padding="12" Background="#3B2A12" BorderBrush="#A16207" BorderThickness="1" CornerRadius="8">
       <TextBlock Foreground="#FEF3C7" Text="Bonding mode sends traffic through the DualLink relay so games keep one public IP while Ethernet, Wi-Fi hotspot, and USB tethering contribute simultaneously. Existing Proton-safe failover remains available when bonding is stopped." TextWrapping="Wrap"/>
     </Border>
-  </Grid>
+    </Grid>
+   </TabItem>
+   <TabItem Header="Connection history" Background="#132238" Foreground="#F8FAFC">
+    <Grid Margin="22">
+      <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="220"/></Grid.RowDefinitions>
+      <DockPanel Grid.Row="0" Margin="0,0,0,12">
+        <StackPanel DockPanel.Dock="Left"><TextBlock FontSize="24" FontWeight="Bold" Text="Connection history"/><TextBlock Foreground="#CBD5E1" Text="Last 15 minutes — quality lines and red connection-drop markers"/></StackPanel>
+        <Button DockPanel.Dock="Right" Content="Clear history" Click="ClearHistory_Click" Padding="14,6" HorizontalAlignment="Right"/>
+      </DockPanel>
+      <Border Grid.Row="1" Background="#0F1B2D" BorderBrush="#334155" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,12">
+        <Grid>
+          <Canvas x:Name="HistoryCanvas" Background="#0B1525" SizeChanged="HistoryCanvas_SizeChanged"/>
+          <TextBlock x:Name="HistoryEmptyText" Text="Collecting connection history…" Foreground="#94A3B8" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="16"/>
+        </Grid>
+      </Border>
+      <DataGrid Grid.Row="2" x:Name="HistoryEventGrid" AutoGenerateColumns="False" IsReadOnly="True" CanUserAddRows="False" Background="#111C2E" Foreground="#FFFFFF" BorderBrush="#334155" HeadersVisibility="Column">
+        <DataGrid.Columns>
+          <DataGridTextColumn Header="Time" Binding="{Binding Time}" Width="1.3*"/>
+          <DataGridTextColumn Header="Connection" Binding="{Binding Connection}" Width="1.3*"/>
+          <DataGridTextColumn Header="Event" Binding="{Binding Event}" Width="1.4*"/>
+          <DataGridTextColumn Header="Outage duration" Binding="{Binding Duration}" Width="*"/>
+        </DataGrid.Columns>
+      </DataGrid>
+    </Grid>
+   </TabItem>
+  </TabControl>
 </Window>
