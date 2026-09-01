@@ -34,6 +34,10 @@ When bonding is stopped, DualLink can continue monitoring physical connections a
 
 The **Connection history** tab keeps a rolling quality chart for Ethernet, Wi-Fi, and USB tethering. It marks connection drops in red and records recovery times and outage durations. Up to 24 hours of history is stored locally and remains available after restarting DualLink.
 
+## Latency display
+
+While bonding is active, DualLink shows direct Internet ping, encrypted relay RTT for every physical path, and end-to-end bonded Internet latency. These measurements make it clear whether delay comes from the local ISP, the route to the relay, or the complete tunnel path.
+
 ## Install and update
 
 Download `DualLink-Setup-x64.exe` from the latest private repository release. The stable installer application ID upgrades an existing installation in place; uninstalling the previous version is not required.
