@@ -8,6 +8,7 @@ Type=simple
 User=duallink
 Group=duallink
 EnvironmentFile=/etc/duallink/relay.env
+Environment=DOTNET_BUNDLE_EXTRACT_BASE_DIR=/tmp/duallink-bundle
 ExecStart=/opt/duallink-relay/DualLink.Relay
 Restart=on-failure
 RestartSec=2
