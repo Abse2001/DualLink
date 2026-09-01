@@ -45,6 +45,9 @@
           <Border Background="#0F1B2D" BorderBrush="#475569" BorderThickness="1" CornerRadius="6" Padding="10,6">
             <TextBlock x:Name="BondingStateText" Text="Bonding: Stopped" Foreground="#CBD5E1" FontWeight="Bold"/>
           </Border>
+          <Border Background="#0F1B2D" BorderBrush="#475569" BorderThickness="1" CornerRadius="6" Padding="10,6" Margin="10,0,0,0">
+            <TextBlock x:Name="RelayLatencyText" Text="Relay latency: Not connected" Foreground="#CBD5E1" FontWeight="Bold"/>
+          </Border>
         </WrapPanel>
       </StackPanel>
     </Border>
@@ -61,6 +64,7 @@
         <DataGridTextColumn Header="Type" Binding="{Binding Type}" Width="*"/>
         <DataGridTextColumn Header="IP address" Binding="{Binding Address}" Width="1.4*"/>
         <DataGridTextColumn Header="Ping" Binding="{Binding Latency}" Width="*"/>
+        <DataGridTextColumn Header="Relay ping" Binding="{Binding RelayLatency}" Width="*"/>
         <DataGridTextColumn Header="Jitter" Binding="{Binding Jitter}" Width="*"/>
         <DataGridTextColumn Header="Loss" Binding="{Binding Loss}" Width="*"/>
         <DataGridTextColumn Header="Quality" Binding="{Binding Score}" Width="*"/>
