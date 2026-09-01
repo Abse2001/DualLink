@@ -7,7 +7,6 @@ namespace DualLink.Relay;
 internal sealed class LinuxTunDevice : IDisposable
 {
     private const int O_RDWR = 2;
-    private const int O_NONBLOCK = 0x800;
     private const int O_CLOEXEC = 0x80000;
     private const uint TUNSETIFF = 0x400454ca;
     private const short IFF_TUN = 0x0001;
@@ -20,9 +19,7 @@ internal sealed class LinuxTunDevice : IDisposable
         if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException("The relay requires Linux.");
         if (string.IsNullOrWhiteSpace(name) || name.Length > 15) throw new ArgumentException("Invalid interface name.", nameof(name));
 
-        // FileStream's Unix async implementation requires a non-blocking descriptor.
-        // Without O_NONBLOCK, .NET rejects isAsync:true before the relay can start.
-        var fd = open("/dev/net/tun", O_RDWR | O_NONBLOCK | O_CLOEXEC);
+        var fd = open("/dev/net/tun", O_RDWR | O_CLOEXEC);
         if (fd < 0) throw new Win32Exception(Marshal.GetLastWin32Error(), "Unable to open /dev/net/tun");
 
         var handle = new SafeFileHandle((IntPtr)fd, ownsHandle: true);
@@ -46,7 +43,10 @@ internal sealed class LinuxTunDevice : IDisposable
             Marshal.FreeHGlobal(request);
         }
 
-        _stream = new FileStream(handle, FileAccess.ReadWrite, 64 * 1024, isAsync: true);
+        // SafeFileHandle instances created from a native Unix fd are synchronous in .NET.
+        // FileStream still exposes ReadAsync/WriteAsync using async-over-sync without
+        // incorrectly treating this descriptor as Windows-style overlapped I/O.
+        _stream = new FileStream(handle, FileAccess.ReadWrite, 64 * 1024, isAsync: false);
     }
 
     public ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken token) => _stream.ReadAsync(buffer, token);
