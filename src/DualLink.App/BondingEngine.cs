@@ -56,6 +56,7 @@ internal sealed class BondingEngine : IAsyncDisposable
     }
 
     public Task UpdatePathsAsync(IEnumerable<BondingPathConfig> paths) => _client.UpdatePathsAsync(paths);
+    public IReadOnlyCollection<BondingPathTraffic> GetTraffic() => _client.GetTraffic();
 
     private async Task ProbeLoopAsync()
     {

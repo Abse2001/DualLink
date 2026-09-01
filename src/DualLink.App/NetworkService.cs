@@ -77,6 +77,16 @@ public sealed class NetworkService
         return new(adapter.Id, DateTimeOffset.Now, online, latency, jitter, loss, LinkScorer.Calculate(online, latency, jitter, loss), error);
     }
 
+    public async Task<bool> VerifyBondedInternetAsync(CancellationToken token)
+    {
+        try
+        {
+            var result = await RunAsync("ping.exe", "-4 -n 1 -w 3000 1.1.1.1", token);
+            return Regex.IsMatch(result, @"time[=<](\d+)ms", RegexOptions.IgnoreCase);
+        }
+        catch { return false; }
+    }
+
     public async Task ApplyMetricsAsync(IEnumerable<AdapterInfo> adapters, string preferredId, int preferredMetric, int backupMetric)
     {
         foreach (var adapter in adapters)

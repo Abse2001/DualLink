@@ -7,10 +7,13 @@ using DualLink.Core;
 namespace DualLink.App;
 
 public sealed record BondingPathConfig(byte PathId, string PathName, IPAddress LocalAddress, int InterfaceIndex);
+public sealed record BondingPathTraffic(string PathName, long UploadedBytes, long DownloadedBytes);
 
 public sealed class BondingPathTransport : IAsyncDisposable
 {
     private readonly Socket _socket;
+    private long _uploadedBytes;
+    private long _downloadedBytes;
 
     public BondingPathConfig Config { get; }
 
@@ -29,11 +32,21 @@ public sealed class BondingPathTransport : IAsyncDisposable
         _socket.Connect(relay);
     }
 
-    public async ValueTask SendAsync(ReadOnlyMemory<byte> datagram, CancellationToken token) =>
-        _ = await _socket.SendAsync(datagram, SocketFlags.None, token);
+    public async ValueTask SendAsync(ReadOnlyMemory<byte> datagram, CancellationToken token)
+    {
+        var sent = await _socket.SendAsync(datagram, SocketFlags.None, token);
+        Interlocked.Add(ref _uploadedBytes, sent);
+    }
 
-    public ValueTask<int> ReceiveAsync(Memory<byte> buffer, CancellationToken token) =>
-        _socket.ReceiveAsync(buffer, SocketFlags.None, token);
+    public async ValueTask<int> ReceiveAsync(Memory<byte> buffer, CancellationToken token)
+    {
+        var received = await _socket.ReceiveAsync(buffer, SocketFlags.None, token);
+        Interlocked.Add(ref _downloadedBytes, received);
+        return received;
+    }
+
+    public BondingPathTraffic GetTraffic() => new(Config.PathName,
+        Interlocked.Read(ref _uploadedBytes), Interlocked.Read(ref _downloadedBytes));
 
     public ValueTask DisposeAsync()
     {
@@ -209,6 +222,8 @@ public sealed class DualPathBondingClient : IAsyncDisposable
             };
         }).ToArray();
     }
+
+    public IReadOnlyCollection<BondingPathTraffic> GetTraffic() => _paths.Values.Select(path => path.GetTraffic()).ToArray();
 
     public async Task UpdatePathsAsync(IEnumerable<BondingPathConfig> configurations)
     {
