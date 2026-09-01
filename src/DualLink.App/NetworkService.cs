@@ -10,6 +10,24 @@ public sealed class NetworkService
 {
     private static readonly string[] ProbeTargets = ["1.1.1.1", "8.8.8.8"];
 
+    public IReadOnlyDictionary<string, AdapterByteCounters> GetAdapterByteCounters()
+    {
+        var counters = new Dictionary<string, AdapterByteCounters>(StringComparer.OrdinalIgnoreCase);
+        foreach (var adapter in NetworkInterface.GetAllNetworkInterfaces().Where(IsPhysicalInternetAdapter))
+        {
+            try
+            {
+                var statistics = adapter.GetIPv4Statistics();
+                counters[adapter.Id] = new(statistics.BytesSent, statistics.BytesReceived);
+            }
+            catch (NetworkInformationException)
+            {
+                // A driver can disappear between enumeration and sampling.
+            }
+        }
+        return counters;
+    }
+
     public bool IsProtonTunnelActive() => NetworkInterface.GetAllNetworkInterfaces().Any(n =>
         n.OperationalStatus == OperationalStatus.Up &&
         ($"{n.Name} {n.Description}".Contains("Proton", StringComparison.OrdinalIgnoreCase) ||
@@ -178,3 +196,5 @@ public sealed class NetworkService
         return output;
     }
 }
+
+public sealed record AdapterByteCounters(long BytesSent, long BytesReceived);
