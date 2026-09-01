@@ -28,6 +28,8 @@ public partial class MainWindow : Window
     private BondingEngine? _bonding;
     private CancellationTokenSource? _serverSetupCancellation;
     private IReadOnlyCollection<BondingPathSample> _bondingSamples = [];
+    private Dictionary<string, BondingPathTraffic> _previousTraffic = new(StringComparer.OrdinalIgnoreCase);
+    private DateTimeOffset _previousTrafficAt = DateTimeOffset.UtcNow;
 
     public MainWindow()
     {
@@ -39,6 +41,8 @@ public partial class MainWindow : Window
         {
             RelayAddressText.Text = saved.RelayAddress;
             RelayKeyBox.Password = Convert.ToBase64String(saved.Key);
+            SetServerState(saved.ServerReady ? $"Server: Ready — {saved.RelayAddress}" : $"Server: Configuration saved — {saved.RelayAddress}",
+                saved.ServerReady ? MediaColor.FromRgb(74, 222, 128) : MediaColor.FromRgb(253, 230, 138));
         }
         Loaded += async (_, _) => await MonitorLoop();
     }
@@ -62,6 +66,7 @@ public partial class MainWindow : Window
 
             var key = RandomNumberGenerator.GetBytes(32);
             _serverSetupCancellation = CancellationTokenSource.CreateLinkedTokenSource(_stop.Token);
+            SetServerState("Server: Setting up…", MediaColor.FromRgb(125, 211, 252));
             ServerSetupButton.Content = "Cancel setup";
             BondingToggleButton.IsEnabled = false;
             RelayAddressText.IsEnabled = false;
@@ -75,7 +80,8 @@ public partial class MainWindow : Window
             });
             await _serverProvisioner.ProvisionAsync(relay, dialog.FileName, key, progress, _serverSetupCancellation.Token);
             RelayKeyBox.Password = Convert.ToBase64String(key);
-            BondingSettingsStore.Save(relay.ToString(), key);
+            BondingSettingsStore.Save(relay.ToString(), key, serverReady: true);
+            SetServerState($"Server: Ready — {relay}", MediaColor.FromRgb(74, 222, 128));
             StatusText.Text = "Relay installed and ready; press Start bonding";
             VpnText.Text = "The bonding key is encrypted for your Windows user with DPAPI.";
             AppLog.Write($"Relay provisioned at {relay}");
@@ -83,10 +89,12 @@ public partial class MainWindow : Window
         catch (OperationCanceledException) when (!_stop.IsCancellationRequested)
         {
             StatusText.Text = "Server setup cancelled. No bonding routes were changed.";
+            SetServerState("Server: Setup cancelled", MediaColor.FromRgb(253, 230, 138));
             AppLog.Write("Relay setup cancelled by user.");
         }
         catch (Exception ex)
         {
+            SetServerState("Server: Setup error", MediaColor.FromRgb(248, 113, 113));
             System.Windows.MessageBox.Show(this, ex.Message, "Unable to set up relay", MessageBoxButton.OK, MessageBoxImage.Error);
             AppLog.Write($"Relay setup failed: {ex}");
         }
@@ -127,10 +135,11 @@ public partial class MainWindow : Window
             UpdateConnectionChoices(adapters);
             var protonActive = ProtonModeCheck.IsChecked == true && _network.IsProtonTunnelActive();
             var routePreference = _lastAppliedId ?? _selectedPreferenceId ?? adapters.FirstOrDefault(x => x.Type == System.Net.NetworkInformation.NetworkInterfaceType.Ethernet)?.Id;
-            await EnsureEndpointRoutesAsync(adapters, routePreference);
+            if (_serverSetupCancellation is null)
+                await EnsureEndpointRoutesAsync(adapters, routePreference);
             var probes = await Task.WhenAll(adapters.Select(x => _network.ProbeAsync(x, _settings.ProbeHost, protonActive, _stop.Token)));
             var decision = ChooseConnection(probes);
-            if (_bonding is null && AutoCheck.IsChecked == true && decision.ActiveAdapterId is not null && decision.Changed)
+            if (_serverSetupCancellation is null && _bonding is null && AutoCheck.IsChecked == true && decision.ActiveAdapterId is not null && decision.Changed)
             {
                 await _network.ApplyMetricsAsync(adapters, decision.ActiveAdapterId, _settings.PreferredMetric, _settings.BackupMetric);
                 await EnsureEndpointRoutesAsync(adapters, decision.ActiveAdapterId, force: true);
@@ -138,10 +147,13 @@ public partial class MainWindow : Window
             }
 
             _rows.Clear();
+            var traffic = BuildTrafficDisplays();
             foreach (var adapter in adapters)
             {
                 var probe = probes.First(x => x.AdapterId == adapter.Id);
-                _rows.Add(AdapterRow.From(adapter, probe, decision.ActiveAdapterId == adapter.Id));
+                traffic.TryGetValue(adapter.Name, out var pathTraffic);
+                _rows.Add(AdapterRow.From(adapter, probe, decision.ActiveAdapterId == adapter.Id,
+                    pathTraffic?.Upload ?? "—", pathTraffic?.Download ?? "—"));
             }
             _bondingSamples = adapters.Select(adapter =>
             {
@@ -195,7 +207,9 @@ public partial class MainWindow : Window
             try { key = Convert.FromBase64String(RelayKeyBox.Password.Trim()); }
             catch (FormatException) { throw new InvalidOperationException("The relay key is not valid Base64."); }
             if (key.Length < 32) throw new InvalidOperationException("The relay key must contain 32 bytes.");
-            BondingSettingsStore.Save(relay.ToString(), key);
+            var serverReady = BondingSettingsStore.Load()?.ServerReady ?? false;
+            BondingSettingsStore.Save(relay.ToString(), key, serverReady);
+            SetBondingState("Bonding: Connecting to relay…", MediaColor.FromRgb(125, 211, 252));
 
             var adapters = _network.GetInternetAdapters().Where(x => x.Address is not null && x.Gateway is not null).ToArray();
             if (adapters.Length < 1) throw new InvalidOperationException("Connect at least one Internet adapter: Ethernet, Wi-Fi, or USB tethering.");
@@ -208,7 +222,11 @@ public partial class MainWindow : Window
             await _network.ConfigureBondingTunnelAsync();
             _bonding.Mode = SelectedBondingMode();
             _bonding.Start();
+            await Task.Delay(750, _stop.Token);
+            if (!await _network.VerifyBondedInternetAsync(_stop.Token))
+                throw new InvalidOperationException("The relay handshake succeeded, but end-to-end Internet forwarding failed. DualLink restored your normal routes.");
             BondingToggleButton.Content = "Stop bonding";
+            SetBondingState($"Bonding: Established — {paths.Count()} path(s) via {relay}", MediaColor.FromRgb(74, 222, 128));
             StatusText.Text = "Bonding connected through the DualLink relay";
             VpnText.Text = $"Public traffic is routed through {relay}; both physical adapters are independently bound.";
             AppLog.Write($"Bonding started through {relay}");
@@ -216,6 +234,7 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             if (_bonding is not null) await StopBondingAsync();
+            SetBondingState("Bonding: Error — normal routes restored", MediaColor.FromRgb(248, 113, 113));
             System.Windows.MessageBox.Show(this, ex.Message, "Unable to start bonding", MessageBoxButton.OK, MessageBoxImage.Error);
             AppLog.Write($"Bonding start failed: {ex}");
         }
@@ -237,9 +256,54 @@ public partial class MainWindow : Window
         if (IPAddress.TryParse(RelayAddressText.Text.Trim(), out var relay))
             await _network.RemoveBondingEndpointRoutesAsync(_network.GetInternetAdapters(), relay);
         BondingToggleButton.Content = "Start bonding";
+        SetBondingState("Bonding: Stopped", MediaColor.FromRgb(203, 213, 225));
+        _previousTraffic.Clear();
         StatusText.Text = "Bonding stopped; existing failover monitoring remains active";
         AppLog.Write("Bonding stopped");
     }
+
+    private Dictionary<string, TrafficDisplay> BuildTrafficDisplays()
+    {
+        if (_bonding is null) return new(StringComparer.OrdinalIgnoreCase);
+        var now = DateTimeOffset.UtcNow;
+        var elapsed = Math.Max(0.001, (now - _previousTrafficAt).TotalSeconds);
+        var current = _bonding.GetTraffic().ToDictionary(item => item.PathName, StringComparer.OrdinalIgnoreCase);
+        var display = new Dictionary<string, TrafficDisplay>(StringComparer.OrdinalIgnoreCase);
+        foreach (var item in current.Values)
+        {
+            _previousTraffic.TryGetValue(item.PathName, out var previous);
+            var uploadRate = Math.Max(0, item.UploadedBytes - (previous?.UploadedBytes ?? item.UploadedBytes)) * 8d / elapsed / 1_000_000d;
+            var downloadRate = Math.Max(0, item.DownloadedBytes - (previous?.DownloadedBytes ?? item.DownloadedBytes)) * 8d / elapsed / 1_000_000d;
+            display[item.PathName] = new($"{uploadRate:0.00} Mbps · {FormatBytes(item.UploadedBytes)}",
+                $"{downloadRate:0.00} Mbps · {FormatBytes(item.DownloadedBytes)}");
+        }
+        _previousTraffic = current;
+        _previousTrafficAt = now;
+        return display;
+    }
+
+    private static string FormatBytes(long bytes)
+    {
+        string[] units = ["B", "KB", "MB", "GB", "TB"];
+        var value = (double)Math.Max(0, bytes);
+        var unit = 0;
+        while (value >= 1024 && unit < units.Length - 1) { value /= 1024; unit++; }
+        return $"{value:0.##} {units[unit]}";
+    }
+
+    private void SetServerState(string text, MediaColor color)
+    {
+        ServerStateText.Text = text;
+        ServerStateText.Foreground = new SolidColorBrush(color);
+    }
+
+    private void SetBondingState(string text, MediaColor color)
+    {
+        BondingStateText.Text = text;
+        BondingStateText.Foreground = new SolidColorBrush(color);
+    }
+
+    private sealed record TrafficDisplay(string Upload, string Download);
 
     private FailoverDecision ChooseConnection(IReadOnlyCollection<ProbeResult> probes)
     {
@@ -347,13 +411,13 @@ public partial class MainWindow : Window
     }
 }
 
-public sealed record AdapterRow(string Name, string Type, string Address, string Latency, string Jitter, string Loss, string Score, string Role)
+public sealed record AdapterRow(string Name, string Type, string Address, string Latency, string Jitter, string Loss, string Score, string Upload, string Download, string Role)
 {
-    public static AdapterRow From(AdapterInfo adapter, ProbeResult probe, bool active) => new(
+    public static AdapterRow From(AdapterInfo adapter, ProbeResult probe, bool active, string upload = "—", string download = "—") => new(
         adapter.Name, FriendlyType(adapter), adapter.Address?.ToString() ?? "—",
         probe.Online ? $"{probe.LatencyMs:0} ms" : "Offline",
         probe.Online ? $"{probe.JitterMs:0} ms" : "—",
-        $"{probe.PacketLossPercent:0}%", $"{probe.Score:0}", active ? "Preferred" : "Backup");
+        $"{probe.PacketLossPercent:0}%", $"{probe.Score:0}", upload, download, active ? "Preferred" : "Backup");
 
     private static string FriendlyType(AdapterInfo adapter)
     {
