@@ -414,7 +414,7 @@ public partial class MainWindow : Window
         foreach (var group in samples.GroupBy(x => x.Connection).OrderBy(x => x.Key))
         {
             var color = colors[colorIndex++ % colors.Length];
-            var points = new PointCollection(group.OrderBy(x => x.Timestamp).Select(sample => new Point(
+            var points = new PointCollection(group.OrderBy(x => x.Timestamp).Select(sample => new System.Windows.Point(
                 left + plotWidth * Math.Clamp((sample.Timestamp - start).TotalSeconds / (end - start).TotalSeconds, 0, 1),
                 top + plotHeight * (1 - Math.Clamp(sample.Quality, 0, 100) / 100d))));
             HistoryCanvas.Children.Add(new Polyline { Points = points, Stroke = new SolidColorBrush(color), StrokeThickness = 2 });
