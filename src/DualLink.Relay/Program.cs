@@ -38,6 +38,8 @@ var replays = new ConcurrentDictionary<ulong, ReplayWindow>();
 var reorder = new ConcurrentDictionary<ulong, PacketReorderBuffer>();
 long outboundSequence = 0;
 var pathPacketCounts = new ConcurrentDictionary<(ulong Session, byte Path), int>();
+var sessionControls = new ConcurrentDictionary<ulong, BondingControl>();
+var downlinkSchedulers = new ConcurrentDictionary<ulong, AdaptiveBondingScheduler>();
 
 ulong NextOutboundSequence() => unchecked((ulong)Interlocked.Increment(ref outboundSequence));
 
@@ -57,6 +59,8 @@ var receiveTask = Task.Run(async () =>
         if (!replay.TryAccept(packet.Sequence)) continue;
 
         peers[(packet.SessionId, packet.PathId)] = new Peer(datagram.RemoteEndPoint, DateTimeOffset.UtcNow);
+        if (packet.Kind == BondingPacketKind.Control && BondingControlCodec.TryDecode(packet.Payload.Span, out var control) && control is not null)
+            sessionControls[packet.SessionId] = control;
         var orderBuffer = reorder.GetOrAdd(packet.SessionId, _ => new PacketReorderBuffer(TimeSpan.FromMilliseconds(150)));
         var ordered = orderBuffer.Add(
             packet.Sequence,
@@ -105,23 +109,51 @@ var transmitTask = Task.Run(async () =>
         var now = DateTimeOffset.UtcNow;
         var active = peers
             .Where(entry => now - entry.Value.LastSeen < TimeSpan.FromSeconds(15))
-            .OrderBy(entry => entry.Key.Path)
+            .OrderByDescending(entry => entry.Value.LastSeen)
             .ToArray();
         if (active.Length == 0) continue;
 
-        // Phase-one downlink policy alternates live paths. The adaptive metrics
-        // scheduler will replace this after client feedback is connected.
+        var session = active[0].Key.Session;
+        var sessionPaths = active.Where(entry => entry.Key.Session == session).OrderBy(entry => entry.Key.Path).ToArray();
+        if (sessionPaths.Length == 0) continue;
         var sequence = NextOutboundSequence();
-        var selected = active[(int)(sequence % (ulong)active.Length)];
-        var frame = BondingPacketCodec.Encode(new BondingPacket(
-            BondingPacketKind.Data,
-            selected.Key.Path,
-            selected.Key.Session,
-            sequence,
-            0,
-            buffer.AsMemory(0, length),
-            BondingDirection.Downlink), key);
-        await udp.SendAsync(frame, selected.Value.EndPoint, shutdown.Token);
+        sessionControls.TryGetValue(session, out var control);
+        if (control?.Mode == BondingMode.Redundant)
+        {
+            foreach (var selected in sessionPaths)
+            {
+                var duplicate = BondingPacketCodec.Encode(new BondingPacket(BondingPacketKind.Data,
+                    selected.Key.Path, session, sequence, 0, buffer.AsMemory(0, length), BondingDirection.Downlink), key);
+                await udp.SendAsync(duplicate, selected.Value.EndPoint, shutdown.Token);
+            }
+            continue;
+        }
+
+        KeyValuePair<(ulong Session, byte Path), Peer> selectedPath;
+        if (control?.Mode == BondingMode.Failover)
+        {
+            selectedPath = sessionPaths.FirstOrDefault(path => path.Key.Path == control.PreferredPathId);
+            if (selectedPath.Value is null) selectedPath = sessionPaths[0];
+        }
+        else if (control is not null)
+        {
+            var liveIds = sessionPaths.Select(path => path.Key.Path).ToHashSet();
+            var samples = control.Paths.Where(path => liveIds.Contains(path.PathId)).Select(path => new BondingPathSample(
+                path.PathId.ToString(), path.Online, path.RttMs, path.JitterMs, path.LossPercent,
+                Math.Max(.1, path.DeliveryRateMbps), 0, Math.Clamp(1 - path.LossPercent / 100d, .05, 1))).ToArray();
+            var scheduler = downlinkSchedulers.GetOrAdd(session, _ => new AdaptiveBondingScheduler());
+            var selectedId = scheduler.SelectPath(samples, length, BondingMode.Bonding);
+            selectedPath = sessionPaths.FirstOrDefault(path => path.Key.Path.ToString() == selectedId);
+            if (selectedPath.Value is null) selectedPath = sessionPaths[0];
+        }
+        else
+        {
+            selectedPath = sessionPaths[(int)(sequence % (ulong)sessionPaths.Length)];
+        }
+
+        var frame = BondingPacketCodec.Encode(new BondingPacket(BondingPacketKind.Data,
+            selectedPath.Key.Path, session, sequence, 0, buffer.AsMemory(0, length), BondingDirection.Downlink), key);
+        await udp.SendAsync(frame, selectedPath.Value.EndPoint, shutdown.Token);
     }
 }, shutdown.Token);
 

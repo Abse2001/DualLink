@@ -154,6 +154,28 @@ public sealed class DualPathBondingClient : IAsyncDisposable
         }
     }
 
+    public async ValueTask SendControlAsync(BondingMode mode, IReadOnlyCollection<BondingPathSample> samples, CancellationToken token)
+    {
+        var measured = samples
+            .Where(sample => _paths.ContainsKey(sample.PathId))
+            .Select(sample =>
+            {
+                var path = _paths[sample.PathId];
+                return new BondingControlPath(path.Config.PathId, sample.Online, sample.SmoothedRttMs,
+                    sample.JitterMs, sample.LossPercent, sample.DeliveryRateMbps);
+            }).ToArray();
+        var preferred = measured.Where(path => path.Online)
+            .OrderBy(path => path.RttMs / 2d + path.JitterMs + path.LossPercent * 2d)
+            .FirstOrDefault()?.PathId ?? (byte)0;
+        var payload = BondingControlCodec.Encode(new(mode, preferred, measured));
+        foreach (var path in _paths.Values)
+        {
+            var frame = BondingPacketCodec.Encode(new BondingPacket(BondingPacketKind.Control,
+                path.Config.PathId, _sessionId, NextSequence(), 0, payload, BondingDirection.Uplink), _key);
+            await path.SendAsync(frame, token);
+        }
+    }
+
     public async Task WaitForRelayAsync(TimeSpan timeout, CancellationToken token)
     {
         using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(token);

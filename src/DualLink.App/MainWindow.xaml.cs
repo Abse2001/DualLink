@@ -242,10 +242,10 @@ public partial class MainWindow : Window
             var paths = adapters.Select((adapter, index) => new BondingPathConfig(
                 (byte)(index + 1), adapter.Name, adapter.Address!, adapter.InterfaceIndex));
             _bonding = new BondingEngine(paths, relay, 443, key, () => _bondingSamples);
+            _bonding.Mode = SelectedBondingMode();
             StatusText.Text = "Testing encrypted relay connectivity on every physical path…";
             await _bonding.ConnectAsync(TimeSpan.FromSeconds(6), _stop.Token);
             await _network.ConfigureBondingTunnelAsync();
-            _bonding.Mode = SelectedBondingMode();
             _bonding.Start();
             await Task.Delay(750, _stop.Token);
             if (!await _network.VerifyBondedInternetAsync(_stop.Token))

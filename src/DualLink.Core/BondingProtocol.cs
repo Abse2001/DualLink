@@ -3,7 +3,7 @@ using System.Security.Cryptography;
 
 namespace DualLink.Core;
 
-public enum BondingPacketKind : byte { Data = 1, Probe = 2, ProbeReply = 3, Ack = 4 }
+public enum BondingPacketKind : byte { Data = 1, Probe = 2, ProbeReply = 3, Ack = 4, Control = 5 }
 public enum BondingDirection : byte { Uplink = 1, Downlink = 2 }
 
 public sealed record BondingPacket(
@@ -14,6 +14,60 @@ public sealed record BondingPacket(
     ulong Acknowledgement,
     ReadOnlyMemory<byte> Payload,
     BondingDirection Direction = BondingDirection.Uplink);
+
+public sealed record BondingControlPath(byte PathId, bool Online, double RttMs, double JitterMs, double LossPercent, double DeliveryRateMbps);
+public sealed record BondingControl(BondingMode Mode, byte PreferredPathId, IReadOnlyList<BondingControlPath> Paths);
+
+public static class BondingControlCodec
+{
+    private const byte ControlVersion = 1;
+    private const int PathSize = 10;
+
+    public static byte[] Encode(BondingControl control)
+    {
+        if (control.Paths.Count > byte.MaxValue) throw new ArgumentOutOfRangeException(nameof(control));
+        var data = new byte[4 + control.Paths.Count * PathSize];
+        data[0] = ControlVersion;
+        data[1] = (byte)control.Mode;
+        data[2] = control.PreferredPathId;
+        data[3] = (byte)control.Paths.Count;
+        for (var index = 0; index < control.Paths.Count; index++)
+        {
+            var path = control.Paths[index];
+            var offset = 4 + index * PathSize;
+            data[offset] = path.PathId;
+            data[offset + 1] = path.Online ? (byte)1 : (byte)0;
+            BinaryPrimitives.WriteUInt16BigEndian(data.AsSpan(offset + 2, 2), Scale(path.RttMs, 1));
+            BinaryPrimitives.WriteUInt16BigEndian(data.AsSpan(offset + 4, 2), Scale(path.JitterMs, 1));
+            BinaryPrimitives.WriteUInt16BigEndian(data.AsSpan(offset + 6, 2), Scale(path.LossPercent, 100));
+            BinaryPrimitives.WriteUInt16BigEndian(data.AsSpan(offset + 8, 2), Scale(path.DeliveryRateMbps, 10));
+        }
+        return data;
+    }
+
+    public static bool TryDecode(ReadOnlySpan<byte> data, out BondingControl? control)
+    {
+        control = null;
+        if (data.Length < 4 || data[0] != ControlVersion || !Enum.IsDefined((BondingMode)data[1])) return false;
+        var count = data[3];
+        if (data.Length != 4 + count * PathSize) return false;
+        var paths = new List<BondingControlPath>(count);
+        for (var index = 0; index < count; index++)
+        {
+            var offset = 4 + index * PathSize;
+            paths.Add(new(data[offset], data[offset + 1] != 0,
+                BinaryPrimitives.ReadUInt16BigEndian(data.Slice(offset + 2, 2)),
+                BinaryPrimitives.ReadUInt16BigEndian(data.Slice(offset + 4, 2)),
+                BinaryPrimitives.ReadUInt16BigEndian(data.Slice(offset + 6, 2)) / 100d,
+                BinaryPrimitives.ReadUInt16BigEndian(data.Slice(offset + 8, 2)) / 10d));
+        }
+        control = new((BondingMode)data[1], data[2], paths);
+        return true;
+    }
+
+    private static ushort Scale(double value, double scale) =>
+        (ushort)Math.Clamp(Math.Round(Math.Max(0, value) * scale), 0, ushort.MaxValue);
+}
 
 public static class BondingPacketCodec
 {

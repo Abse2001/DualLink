@@ -42,6 +42,7 @@ internal sealed class BondingEngine : IAsyncDisposable
     public async Task ConnectAsync(TimeSpan timeout, CancellationToken token)
     {
         _client.Start();
+        await _client.SendControlAsync(Mode, _client.GetAdaptiveSamples(_samples()), token);
         await _client.ProbeAllAsync(token);
         await _client.WaitForRelayAsync(timeout, token);
     }
@@ -63,7 +64,10 @@ internal sealed class BondingEngine : IAsyncDisposable
     {
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(2));
         while (await timer.WaitForNextTickAsync(_shutdown.Token))
+        {
+            await _client.SendControlAsync(Mode, _client.GetAdaptiveSamples(_samples()), _shutdown.Token);
             await _client.ProbeAllAsync(_shutdown.Token);
+        }
     }
 
     public async ValueTask DisposeAsync()

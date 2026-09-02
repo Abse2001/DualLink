@@ -45,6 +45,34 @@ public sealed class BondingProtocolTests
     }
 
     [Fact]
+    public void ControlMessageRoundTripsPathTelemetry()
+    {
+        var original = new BondingControl(BondingMode.Failover, 2,
+        [
+            new BondingControlPath(1, true, 31, 2, .25, 20.4),
+            new BondingControlPath(2, false, 64, 9, 3.5, 0)
+        ]);
+
+        var encoded = BondingControlCodec.Encode(original);
+
+        Assert.True(BondingControlCodec.TryDecode(encoded, out var decoded));
+        Assert.NotNull(decoded);
+        Assert.Equal(BondingMode.Failover, decoded!.Mode);
+        Assert.Equal(2, decoded.PreferredPathId);
+        Assert.Equal(2, decoded.Paths.Count);
+        Assert.Equal(20.4, decoded.Paths[0].DeliveryRateMbps, 1);
+        Assert.Equal(.25, decoded.Paths[0].LossPercent, 2);
+        Assert.False(decoded.Paths[1].Online);
+    }
+
+    [Fact]
+    public void InvalidControlMessageIsRejected()
+    {
+        Assert.False(BondingControlCodec.TryDecode([1, 255, 0, 0], out _));
+        Assert.False(BondingControlCodec.TryDecode([1, 0, 0, 1], out _));
+    }
+
+    [Fact]
     public void ReplayWindowRejectsDuplicatesAndExpiredSequences()
     {
         var window = new ReplayWindow(4);
