@@ -90,7 +90,8 @@ ss -lunp | grep -q ':443 '
         security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
         security.AddAccessRule(new FileSystemAccessRule(identity, FileSystemRights.FullControl,
             InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
-        Directory.CreateDirectory(path, security);
+        var directory = Directory.CreateDirectory(path);
+        directory.SetAccessControl(security);
         return path;
     }
 
