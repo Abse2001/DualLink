@@ -1,6 +1,9 @@
 using System.Diagnostics;
 using System.Net;
 using System.IO;
+using System.Security.AccessControl;
+using System.Security.Cryptography;
+using System.Security.Principal;
 
 namespace DualLink.App;
 
@@ -17,8 +20,7 @@ internal sealed class ServerProvisioner
         var ssh = FindOpenSsh("ssh.exe");
         var scp = FindOpenSsh("scp.exe");
         var destination = $"ubuntu@{relay}";
-        var temporaryDirectory = Path.Combine(Path.GetTempPath(), $"duallink-{Guid.NewGuid():N}");
-        Directory.CreateDirectory(temporaryDirectory);
+        var temporaryDirectory = CreatePrivateTemporaryDirectory();
         var environmentFile = Path.Combine(temporaryDirectory, "relay.env");
         var provisionFile = Path.Combine(temporaryDirectory, "provision-relay.sh");
         await File.WriteAllTextAsync(environmentFile, $"DUALLINK_KEY={Convert.ToBase64String(bondingKey)}\nDUALLINK_PORT=443\n", token);
@@ -35,6 +37,8 @@ diagnostics() {
   exit "$rc"
 }
 trap diagnostics ERR
+cleanup() { rm -rf -- /tmp/duallink-install; }
+trap cleanup EXIT
 
 sed -i 's/\r$//' /tmp/duallink-install/install-relay.sh /tmp/duallink-install/duallink-relay.service
 bash /tmp/duallink-install/install-relay.sh /tmp/duallink-install/DualLink.Relay
@@ -51,7 +55,8 @@ ss -lunp | grep -q ':443 '
             progress.Report("Creating the private installation directory on the relay…");
             await RunAsync(ssh, CommonArguments(privateKeyPath, destination).Concat([destination, "mkdir -p /tmp/duallink-install && chmod 700 /tmp/duallink-install"]), token);
 
-            progress.Report("Uploading the signed DualLink relay package…");
+            progress.Report("Verifying and uploading the DualLink relay package…");
+            VerifyRelayPackage(relayDirectory, required);
             var uploadArguments = CommonArguments(privateKeyPath, destination)
                 .Concat(required.Select(file => Path.Combine(relayDirectory, file)))
                 .Concat([environmentFile, provisionFile, $"{destination}:/tmp/duallink-install/"]);
@@ -70,8 +75,42 @@ ss -lunp | grep -q ':443 '
     }
 
     private static IEnumerable<string> CommonArguments(string keyPath, string destination) =>
-        ["-i", keyPath, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=15",
+        ["-i", keyPath, "-o", "BatchMode=yes", "-o", "PasswordAuthentication=no", "-o", "KbdInteractiveAuthentication=no",
+         "-o", "IdentitiesOnly=yes", "-o", "ForwardAgent=no", "-o", "ClearAllForwardings=yes",
+         "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=15",
          "-o", "ConnectionAttempts=1", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2"];
+
+    private static string CreatePrivateTemporaryDirectory()
+    {
+        var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DualLink", "Temp");
+        Directory.CreateDirectory(root);
+        var path = Path.Combine(root, Guid.NewGuid().ToString("N"));
+        var identity = WindowsIdentity.GetCurrent().User ?? throw new InvalidOperationException("Unable to identify the current Windows user.");
+        var security = new DirectorySecurity();
+        security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+        security.AddAccessRule(new FileSystemAccessRule(identity, FileSystemRights.FullControl,
+            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
+        Directory.CreateDirectory(path, security);
+        return path;
+    }
+
+    private static void VerifyRelayPackage(string relayDirectory, IEnumerable<string> files)
+    {
+        var manifestPath = Path.Combine(relayDirectory, "SHA256SUMS.txt");
+        if (!File.Exists(manifestPath)) throw new InvalidDataException("The relay integrity manifest is missing.");
+        var expected = File.ReadLines(manifestPath)
+            .Select(line => line.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            .Where(parts => parts.Length == 2)
+            .ToDictionary(parts => parts[1], parts => parts[0], StringComparer.Ordinal);
+        foreach (var file in files)
+        {
+            if (!expected.TryGetValue(file, out var hash)) throw new InvalidDataException($"The integrity manifest does not contain {file}.");
+            using var stream = File.OpenRead(Path.Combine(relayDirectory, file));
+            var actual = Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
+            if (!CryptographicOperations.FixedTimeEquals(Convert.FromHexString(actual), Convert.FromHexString(hash)))
+                throw new InvalidDataException($"Relay package integrity check failed for {file}.");
+        }
+    }
 
     private static string FindOpenSsh(string executable)
     {
