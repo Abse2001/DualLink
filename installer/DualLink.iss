@@ -1,5 +1,5 @@
 #define MyAppName "DualLink"
-#define MyAppVersion "2.2.0"
+#define MyAppVersion "2.2.1"
 #define MyAppPublisher "Abse2001"
 #define MyAppExeName "DualLink.exe"
 
@@ -20,8 +20,8 @@ CreateUninstallRegKey=yes
 Uninstallable=yes
 OutputDir=..\artifacts
 OutputBaseFilename=DualLink-Setup-x64
-Compression=lzma2
-SolidCompression=yes
+Compression=zip
+SolidCompression=no
 WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
