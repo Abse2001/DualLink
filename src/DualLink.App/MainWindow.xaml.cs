@@ -46,6 +46,9 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        StartWithWindowsCheck.IsChecked = StartupService.IsEnabled();
+        StartWithWindowsCheck.Checked += StartWithWindowsCheck_Changed;
+        StartWithWindowsCheck.Unchecked += StartWithWindowsCheck_Changed;
         AdapterGrid.ItemsSource = _rows;
         HistoryEventGrid.ItemsSource = _historyEventRows;
         LoadConnectionHistory();
@@ -59,6 +62,27 @@ public partial class MainWindow : Window
                 saved.ServerReady ? MediaColor.FromRgb(74, 222, 128) : MediaColor.FromRgb(253, 230, 138));
         }
         Loaded += async (_, _) => await MonitorLoop();
+    }
+
+    private void StartWithWindowsCheck_Changed(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            StartupService.SetEnabled(StartWithWindowsCheck.IsChecked == true);
+            StatusText.Text = StartWithWindowsCheck.IsChecked == true
+                ? "DualLink will start minimized in the system tray when you sign in"
+                : "Start with Windows is disabled";
+        }
+        catch (Exception ex)
+        {
+            StartWithWindowsCheck.Checked -= StartWithWindowsCheck_Changed;
+            StartWithWindowsCheck.Unchecked -= StartWithWindowsCheck_Changed;
+            StartWithWindowsCheck.IsChecked = StartupService.IsEnabled();
+            StartWithWindowsCheck.Checked += StartWithWindowsCheck_Changed;
+            StartWithWindowsCheck.Unchecked += StartWithWindowsCheck_Changed;
+            System.Windows.MessageBox.Show(this, ex.Message, "Unable to change startup setting", MessageBoxButton.OK, MessageBoxImage.Error);
+            AppLog.Write($"Startup setting failed: {ex}");
+        }
     }
 
     private async void SetupServer_Click(object sender, RoutedEventArgs e)

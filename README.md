@@ -46,6 +46,8 @@ Every release also includes `SHA256SUMS.txt`. Compare its installer hash with `G
 
 Administrator permission is required to create Wintun and change routes. **Restore Windows defaults** removes DualLink-managed tunnel routes and restores automatic interface metrics.
 
+Enable **Start with Windows** on the dashboard to launch DualLink minimized after sign-in. Minimizing or closing the main window keeps bonding and monitoring active in the system tray; double-click the DualLink tray icon to restore it, or use **Exit** from the tray menu to stop the application.
+
 Logs: `%LOCALAPPDATA%\DualLink\duallink.log`
 
 ## Development
