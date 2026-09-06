@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Media;
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Windows.Controls;
 using System.Security.Cryptography;
 using System.Windows.Shapes;
@@ -42,6 +43,7 @@ public partial class MainWindow : Window
     private readonly Dictionary<string, DateTimeOffset> _outageStarted = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _knownConnectionTypes = new(StringComparer.OrdinalIgnoreCase);
     private DateTimeOffset _lastHistorySave = DateTimeOffset.MinValue;
+    private readonly SemaphoreSlim _networkChanged = new(0, 1);
 
     public MainWindow()
     {
@@ -62,6 +64,8 @@ public partial class MainWindow : Window
                 saved.ServerReady ? MediaColor.FromRgb(74, 222, 128) : MediaColor.FromRgb(253, 230, 138));
         }
         Loaded += async (_, _) => await MonitorLoop();
+        NetworkChange.NetworkAddressChanged += NetworkChanged;
+        NetworkChange.NetworkAvailabilityChanged += NetworkAvailabilityChanged;
     }
 
     private void StartWithWindowsCheck_Changed(object sender, RoutedEventArgs e)
@@ -154,9 +158,25 @@ public partial class MainWindow : Window
         while (!_stop.IsCancellationRequested)
         {
             await RefreshAsync();
-            try { await Task.Delay(TimeSpan.FromSeconds(_settings.ProbeIntervalSeconds), _stop.Token); }
-            catch (OperationCanceledException) { break; }
+            try
+            {
+                using var interval = CancellationTokenSource.CreateLinkedTokenSource(_stop.Token);
+                interval.CancelAfter(TimeSpan.FromMilliseconds(_settings.ProbeIntervalMilliseconds));
+                await _networkChanged.WaitAsync(interval.Token);
+            }
+            catch (OperationCanceledException) when (_stop.IsCancellationRequested) { break; }
+            catch (OperationCanceledException) { }
         }
+    }
+
+    private void NetworkChanged(object? sender, EventArgs e) => WakeNetworkMonitor();
+
+    private void NetworkAvailabilityChanged(object? sender, NetworkAvailabilityEventArgs e) => WakeNetworkMonitor();
+
+    private void WakeNetworkMonitor()
+    {
+        try { _networkChanged.Release(); }
+        catch (SemaphoreFullException) { }
     }
 
     private async Task RefreshAsync()
@@ -660,6 +680,8 @@ public partial class MainWindow : Window
 
     protected override void OnClosed(EventArgs e)
     {
+        NetworkChange.NetworkAddressChanged -= NetworkChanged;
+        NetworkChange.NetworkAvailabilityChanged -= NetworkAvailabilityChanged;
         _stop.Cancel();
         ConnectionHistoryStore.Save(new(_historySamples, _historyEvents));
         if (_bonding is not null) StopBondingAsync().GetAwaiter().GetResult();

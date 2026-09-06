@@ -62,11 +62,17 @@ internal sealed class BondingEngine : IAsyncDisposable
 
     private async Task ProbeLoopAsync()
     {
-        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(2));
+        using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(150));
+        var lastControl = DateTimeOffset.MinValue;
         while (await timer.WaitForNextTickAsync(_shutdown.Token))
         {
-            await _client.SendControlAsync(Mode, _client.GetAdaptiveSamples(_samples()), _shutdown.Token);
             await _client.ProbeAllAsync(_shutdown.Token);
+            var now = DateTimeOffset.UtcNow;
+            if (now - lastControl >= TimeSpan.FromMilliseconds(300))
+            {
+                await _client.SendControlAsync(Mode, _client.GetAdaptiveSamples(_samples()), _shutdown.Token);
+                lastControl = now;
+            }
         }
     }
 

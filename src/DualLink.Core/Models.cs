@@ -33,7 +33,7 @@ public sealed record DualLinkSettings
 {
     public bool AutoOptimize { get; init; } = true;
     public string ProbeHost { get; init; } = "1.1.1.1";
-    public int ProbeIntervalSeconds { get; init; } = 1;
+    public int ProbeIntervalMilliseconds { get; init; } = 250;
     public int SwitchConfirmationCount { get; init; } = 3;
     public double MinimumScoreImprovement { get; init; } = 12;
     public int PreferredMetric { get; init; } = 10;
