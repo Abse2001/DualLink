@@ -120,6 +120,7 @@ jobs:
           [IO.File]::WriteAllLines((Join-Path $PWD 'artifacts/SHA256SUMS.txt'), $lines, (New-Object Text.UTF8Encoding($false)))
           Get-Content artifacts/SHA256SUMS.txt
       - uses: actions/upload-artifact@v5
+        continue-on-error: true
         with:
           name: DualLink-Setup-x64
           path: |
@@ -163,6 +164,7 @@ jobs:
           cp deploy/linux/duallink-relay.service relay-package/
           chmod +x relay-package/install-relay.sh relay-package/DualLink.Relay
       - uses: actions/upload-artifact@v5
+        continue-on-error: true
         with:
           name: DualLink-Relay-linux-x64
           path: relay-package/
