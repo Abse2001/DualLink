@@ -74,7 +74,7 @@ public partial class MainWindow : Window
         {
             StartupService.SetEnabled(StartWithWindowsCheck.IsChecked == true);
             StatusText.Text = StartWithWindowsCheck.IsChecked == true
-                ? "DualLink will start minimized in the system tray when you sign in"
+                ? "LinkWeaver will start minimized in the system tray when you sign in"
                 : "Start with Windows is disabled";
         }
         catch (Exception ex)
@@ -293,10 +293,10 @@ public partial class MainWindow : Window
             _bonding.Start();
             await Task.Delay(750, _stop.Token);
             if (!await _network.VerifyBondedInternetAsync(_stop.Token))
-                throw new InvalidOperationException("The relay handshake succeeded, but end-to-end Internet forwarding failed. DualLink restored your normal routes.");
+                throw new InvalidOperationException("The relay handshake succeeded, but end-to-end Internet forwarding failed. LinkWeaver restored your normal routes.");
             BondingToggleButton.Content = "Stop bonding";
             SetBondingState($"Bonding: Established — {paths.Count()} path(s) via {relay}", MediaColor.FromRgb(74, 222, 128));
-            StatusText.Text = "Bonding connected through the DualLink relay";
+            StatusText.Text = "Bonding connected through the LinkWeaver relay";
             VpnText.Text = $"Public traffic is routed through {relay}; both physical adapters are independently bound.";
             AppLog.Write($"Bonding started through {relay}");
         }
@@ -560,8 +560,8 @@ public partial class MainWindow : Window
         var dialog = new Microsoft.Win32.SaveFileDialog
         {
             Filter = "CSV data (*.csv)|*.csv",
-            FileName = $"DualLink-history-{DateTime.Now:yyyyMMdd-HHmm}.csv",
-            Title = "Export DualLink connection history"
+            FileName = $"LinkWeaver-history-{DateTime.Now:yyyyMMdd-HHmm}.csv",
+            Title = "Export LinkWeaver connection history"
         };
         if (dialog.ShowDialog(this) != true) return;
         ConnectionHistoryStore.ExportCsv(dialog.FileName, _historySamples, _historyEvents);
@@ -651,7 +651,7 @@ public partial class MainWindow : Window
             var adapters = _network.GetInternetAdapters();
             var preferred = _selectedPreferenceId ?? adapters.FirstOrDefault(x => x.Type == System.Net.NetworkInformation.NetworkInterfaceType.Ethernet)?.Id;
             await EnsureEndpointRoutesAsync(adapters, preferred, force: true);
-            System.Windows.MessageBox.Show(this, $"Prepared safely for DualLink:\n\n{prepared.Path}\n\nImport this generated file into WireGuard. Do not import the original file. Keep both Ethernet and Wi-Fi connected before activating it.", "DualLink Proton configuration", MessageBoxButton.OK, MessageBoxImage.Information);
+            System.Windows.MessageBox.Show(this, $"Prepared safely for LinkWeaver:\n\n{prepared.Path}\n\nImport this generated file into WireGuard. Do not import the original file. Keep both Ethernet and Wi-Fi connected before activating it.", "LinkWeaver Proton configuration", MessageBoxButton.OK, MessageBoxImage.Information);
             StatusText.Text = "Proton endpoint routes prepared; import the generated -DualLink.conf file into WireGuard";
         }
         catch (Exception ex)

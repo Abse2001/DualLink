@@ -30,7 +30,7 @@ jobs:
       - name: Download official Wintun
         shell: pwsh
         run: |
-          if (-not (Test-Path publish/DualLink.exe)) { throw 'DualLink publish output is missing.' }
+          if (-not (Test-Path publish/LinkWeaver.exe)) { throw 'LinkWeaver publish output is missing.' }
           Invoke-WebRequest https://www.wintun.net/builds/wintun-0.14.1.zip -OutFile wintun.zip
           if ((Get-FileHash wintun.zip -Algorithm SHA256).Hash.ToLower() -ne '07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51') { throw 'Wintun checksum mismatch' }
           Expand-Archive wintun.zip -DestinationPath wintun
@@ -42,7 +42,7 @@ jobs:
       - name: Smoke-test Wintun adapter
         shell: pwsh
         run: |
-          $process = Start-Process ./publish/DualLink.exe -ArgumentList '--wintun-smoke' -Wait -PassThru
+          $process = Start-Process ./publish/LinkWeaver.exe -ArgumentList '--wintun-smoke' -Wait -PassThru
           if ($process.ExitCode -ne 0) {
             $log = Join-Path $env:LOCALAPPDATA 'DualLink/duallink.log'
             if (Test-Path $log) { Get-Content $log }
@@ -78,9 +78,9 @@ jobs:
           $certificate = Join-Path $env:RUNNER_TEMP 'duallink-signing.pfx'
           try {
             [IO.File]::WriteAllBytes($certificate, [Convert]::FromBase64String($env:DUALLINK_SIGNING_PFX))
-            & signtool sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /f $certificate /p $env:DUALLINK_SIGNING_PASSWORD publish/DualLink.exe
+            & signtool sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /f $certificate /p $env:DUALLINK_SIGNING_PASSWORD publish/LinkWeaver.exe
             if ($LASTEXITCODE -ne 0) { throw 'Application signing failed.' }
-            & signtool verify /pa /all /v publish/DualLink.exe
+            & signtool verify /pa /all /v publish/LinkWeaver.exe
             if ($LASTEXITCODE -ne 0) { throw 'Application signature verification failed.' }
           } finally {
             Remove-Item $certificate -Force -ErrorAction SilentlyContinue
@@ -99,9 +99,9 @@ jobs:
           $certificate = Join-Path $env:RUNNER_TEMP 'duallink-signing.pfx'
           try {
             [IO.File]::WriteAllBytes($certificate, [Convert]::FromBase64String($env:DUALLINK_SIGNING_PFX))
-            & signtool sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /f $certificate /p $env:DUALLINK_SIGNING_PASSWORD artifacts/DualLink-Setup-x64.exe
+            & signtool sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /f $certificate /p $env:DUALLINK_SIGNING_PASSWORD artifacts/LinkWeaver-Setup-x64.exe
             if ($LASTEXITCODE -ne 0) { throw 'Installer signing failed.' }
-            & signtool verify /pa /all /v artifacts/DualLink-Setup-x64.exe
+            & signtool verify /pa /all /v artifacts/LinkWeaver-Setup-x64.exe
             if ($LASTEXITCODE -ne 0) { throw 'Installer signature verification failed.' }
           } finally {
             Remove-Item $certificate -Force -ErrorAction SilentlyContinue
@@ -112,7 +112,7 @@ jobs:
       - name: Generate release checksums
         shell: pwsh
         run: |
-          $files = @('DualLink-Setup-x64.exe', 'DualLink-Relay-linux-x64.zip')
+          $files = @('LinkWeaver-Setup-x64.exe', 'DualLink-Relay-linux-x64.zip')
           $lines = foreach ($file in $files) {
             $hash = (Get-FileHash "artifacts/$file" -Algorithm SHA256).Hash.ToLowerInvariant()
             "$hash  $file"
@@ -122,18 +122,18 @@ jobs:
       - uses: actions/upload-artifact@v5
         continue-on-error: true
         with:
-          name: DualLink-Setup-x64
+          name: LinkWeaver-Setup-x64
           path: |
-            artifacts/DualLink-Setup-x64.exe
+            artifacts/LinkWeaver-Setup-x64.exe
             artifacts/SHA256SUMS.txt
       - name: Publish GitHub release
-        if: startsWith(github.ref, 'refs/tags/v') || (github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, 'Release DualLink 2.2.3'))
+        if: startsWith(github.ref, 'refs/tags/v') || (github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, 'Release LinkWeaver 2.2.4'))
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.2.3
-          name: "DualLink 2.2.3 — Fast Failover"
+          tag_name: v2.2.4
+          name: "LinkWeaver 2.2.4 — Reliable Launch"
           files: |
-            artifacts/DualLink-Setup-x64.exe
+            artifacts/LinkWeaver-Setup-x64.exe
             artifacts/DualLink-Relay-linux-x64.zip
             artifacts/SHA256SUMS.txt
           generate_release_notes: true
