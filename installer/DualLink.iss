@@ -1,5 +1,5 @@
 #define MyAppName "DualLink"
-#define MyAppVersion "2.2.1"
+#define MyAppVersion "2.2.2"
 #define MyAppPublisher "Abse2001"
 #define MyAppExeName "DualLink.exe"
 
@@ -8,6 +8,7 @@ AppId={{D4EE322A-80CF-4377-B7A9-FBE079E2BA32}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
+SetupIconFile=..\src\DualLink.App\Assets\AppIcon.ico
 DefaultDirName={autopf}\DualLink
 DefaultGroupName=DualLink
 PrivilegesRequired=admin
