@@ -109,6 +109,33 @@ public sealed class NetworkService
         catch { return false; }
     }
 
+    public async Task<bool> VerifyRoutedInternetAsync(CancellationToken token)
+    {
+        try
+        {
+            using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+            deadline.CancelAfter(TimeSpan.FromMilliseconds(900));
+            await socket.ConnectAsync(new IPEndPoint(IPAddress.Parse("1.1.1.1"), 443), deadline.Token);
+            return socket.Connected;
+        }
+        catch (Exception error) when (error is SocketException or OperationCanceledException)
+        {
+            return false;
+        }
+    }
+
+    public async Task<bool> RefreshActiveWireGuardTunnelAsync()
+    {
+        const string command =
+            "$services = @(Get-Service -Name 'WireGuardTunnel$*' -ErrorAction SilentlyContinue | Where-Object Status -eq 'Running'); " +
+            "if ($services.Count -eq 0) { 'none'; exit 0 }; " +
+            "$services | Restart-Service -Force -ErrorAction Stop; " +
+            "$services | ForEach-Object { $_.WaitForStatus('Running', [TimeSpan]::FromSeconds(5)) }; 'restarted'";
+        var result = await RunPowerShellAsync(command);
+        return result.Contains("restarted", StringComparison.OrdinalIgnoreCase);
+    }
+
     public async Task<double?> MeasureBondedInternetLatencyAsync(CancellationToken token)
     {
         try
