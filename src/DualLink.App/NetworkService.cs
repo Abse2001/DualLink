@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net;
 using System.Net.NetworkInformation;
+using System.Net.Sockets;
 using System.Text.RegularExpressions;
 using DualLink.Core;
 
@@ -74,20 +75,23 @@ public sealed class NetworkService
             await EnsureHostRouteAsync(target, adapter, 5);
         }
 
-        var samples = new List<double>();
-        var failures = 0;
-        string? error = null;
         const int sampleCount = 2;
-        for (var i = 0; i < sampleCount; i++)
+        async Task<(double? Latency, string? Error)> SampleAsync()
         {
             try
             {
                 var result = await RunAsync("ping.exe", $"-4 -n 1 -w 350 -S {adapter.Address} {target}", token);
                 var match = Regex.Match(result, @"time[=<](\d+)ms", RegexOptions.IgnoreCase);
-                if (match.Success) samples.Add(double.Parse(match.Groups[1].Value)); else failures++;
+                return match.Success ? (double.Parse(match.Groups[1].Value), null) : (null, "Probe timed out");
             }
-            catch (Exception ex) { failures++; error = ex.Message; }
+            catch (Exception ex) { return (null, ex.Message); }
         }
+        // Run samples concurrently: a dead upstream is detected in one timeout
+        // window instead of waiting for two sequential 350 ms timeouts.
+        var results = await Task.WhenAll(Enumerable.Range(0, sampleCount).Select(_ => SampleAsync()));
+        var samples = results.Where(x => x.Latency.HasValue).Select(x => x.Latency!.Value).ToList();
+        var failures = results.Count(x => !x.Latency.HasValue);
+        var error = results.Select(x => x.Error).FirstOrDefault(x => !string.IsNullOrWhiteSpace(x));
         var online = samples.Count > 0;
         var latency = online ? samples.Average() : 0;
         var jitter = samples.Count > 1 ? samples.Zip(samples.Skip(1), (a, b) => Math.Abs(a - b)).Average() : 0;
@@ -118,10 +122,32 @@ public sealed class NetworkService
 
     public async Task ApplyMetricsAsync(IEnumerable<AdapterInfo> adapters, string preferredId, int preferredMetric, int backupMetric)
     {
-        foreach (var adapter in adapters)
+        var commands = new List<string>();
+        foreach (var adapter in adapters.Where(x => x.InterfaceIndex >= 0))
         {
             var metric = adapter.Id == preferredId ? preferredMetric : backupMetric;
-            await RunPowerShellAsync($"Set-NetIPInterface -InterfaceIndex {adapter.InterfaceIndex} -AddressFamily IPv4 -AutomaticMetric Disabled -InterfaceMetric {metric}");
+            commands.Add($"Set-NetIPInterface -InterfaceIndex {adapter.InterfaceIndex} -AddressFamily IPv4 -AutomaticMetric Disabled -InterfaceMetric {metric} -ErrorAction Stop");
+        }
+        if (commands.Count > 0) await RunPowerShellAsync(string.Join("; ", commands));
+    }
+
+    public async Task<bool> VerifyAdapterInternetAsync(AdapterInfo adapter, CancellationToken token)
+    {
+        if (adapter.Address is null || adapter.InterfaceIndex < 0) return false;
+        try
+        {
+            using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            socket.SetSocketOption(SocketOptionLevel.IP, (SocketOptionName)31,
+                IPAddress.HostToNetworkOrder(adapter.InterfaceIndex));
+            socket.Bind(new IPEndPoint(adapter.Address, 0));
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+            deadline.CancelAfter(TimeSpan.FromMilliseconds(650));
+            await socket.ConnectAsync(new IPEndPoint(IPAddress.Parse("1.1.1.1"), 443), deadline.Token);
+            return socket.Connected;
+        }
+        catch (Exception error) when (error is SocketException or OperationCanceledException)
+        {
+            return false;
         }
     }
 
