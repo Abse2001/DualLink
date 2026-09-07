@@ -2,7 +2,7 @@
 
 LinkWeaver is a free Windows 11 multipath tunnel that bonds Ethernet, Wi-Fi hotspot, and USB tethering through a self-hosted Linux relay. It also preserves the original route-metric failover and Proton WireGuard preparation modes. Existing DualLink settings and relay installations remain compatible.
 
-## Verified fast failover
+## Verified fast failover (2.2.6)
 
 LinkWeaver 2.2.6 treats end-to-end reachability as authoritative when a cable
 remains connected but its upstream Internet service fails. Physical probes run
