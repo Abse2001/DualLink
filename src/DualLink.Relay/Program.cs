@@ -40,6 +40,11 @@ long outboundSequence = 0;
 var pathPacketCounts = new ConcurrentDictionary<(ulong Session, byte Path), int>();
 var sessionControls = new ConcurrentDictionary<ulong, BondingControl>();
 var downlinkSchedulers = new ConcurrentDictionary<ulong, AdaptiveBondingScheduler>();
+// Client probes arrive every 150 ms.  A physical link can remain electrically
+// connected while its ISP is dead, so endpoint liveness—not NIC link state—is
+// authoritative.  Five missed probes gives jitter tolerance without leaving
+// return traffic pinned to a dead WAN for seconds.
+var peerTimeout = TimeSpan.FromMilliseconds(750);
 
 ulong NextOutboundSequence() => unchecked((ulong)Interlocked.Increment(ref outboundSequence));
 
@@ -108,7 +113,7 @@ var transmitTask = Task.Run(async () =>
 
         var now = DateTimeOffset.UtcNow;
         var active = peers
-            .Where(entry => now - entry.Value.LastSeen < TimeSpan.FromSeconds(15))
+            .Where(entry => now - entry.Value.LastSeen <= peerTimeout)
             .OrderByDescending(entry => entry.Value.LastSeen)
             .ToArray();
         if (active.Length == 0) continue;
