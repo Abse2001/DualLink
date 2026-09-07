@@ -208,6 +208,8 @@ public partial class MainWindow : Window
                     _lastAppliedId = requested.Id;
                     confirmedActiveId = requested.Id;
                     decision = decision with { Reason = $"Switched to {requested.Name}; Internet path verified" };
+                    if (protonActive)
+                        decision = decision with { Reason = await RecoverWireGuardAfterPathSwitchAsync(requested.Name, decision.Reason) };
                 }
                 else
                 {
@@ -224,6 +226,8 @@ public partial class MainWindow : Window
                             _lastAppliedId = fallback.Id;
                             confirmedActiveId = fallback.Id;
                             decision = new(fallback.Id, true, $"{requested.Name} failed verification; switched to verified {fallback.Name}");
+                            if (protonActive)
+                                decision = decision with { Reason = await RecoverWireGuardAfterPathSwitchAsync(fallback.Name, decision.Reason) };
                         }
                     }
                     if (confirmedActiveId is null)
@@ -293,6 +297,24 @@ public partial class MainWindow : Window
             StatusDot.Fill = MediaBrushes.Red;
             AppLog.Write(ex.ToString());
         }
+    }
+
+    private async Task<string> RecoverWireGuardAfterPathSwitchAsync(string adapterName, string successReason)
+    {
+        // The endpoint /32 route is already moved before this call. Most WireGuard
+        // tunnels roam without intervention; if routed traffic remains stuck on the
+        // old NIC, restart only the active tunnel service and verify it recovered.
+        await Task.Delay(250, _stop.Token);
+        if (await _network.VerifyRoutedInternetAsync(_stop.Token)) return successReason;
+
+        AppLog.Write($"WireGuard did not roam to {adapterName}; refreshing the active tunnel service.");
+        if (!await _network.RefreshActiveWireGuardTunnelAsync())
+            return $"{adapterName} is verified, but WireGuard is not passing traffic; reconnect the tunnel";
+
+        await Task.Delay(500, _stop.Token);
+        return await _network.VerifyRoutedInternetAsync(_stop.Token)
+            ? $"Switched to {adapterName}; WireGuard automatically recovered and Internet was verified"
+            : $"{adapterName} is verified, but WireGuard recovery failed; tunnel traffic is offline";
     }
 
     private async void BondingToggle_Click(object sender, RoutedEventArgs e)
