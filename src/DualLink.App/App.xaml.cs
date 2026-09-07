@@ -29,6 +29,23 @@ public partial class App : System.Windows.Application
             }
             return;
         }
+        if (e.Args.Contains("--ui-smoke", StringComparer.OrdinalIgnoreCase))
+        {
+            try
+            {
+                _window = new MainWindow();
+                AppLog.Write("LinkWeaver UI smoke test passed.");
+                _exitRequested = true;
+                _window.Close();
+                Shutdown(0);
+            }
+            catch (Exception error)
+            {
+                AppLog.Write($"LinkWeaver UI smoke test failed: {error}");
+                Shutdown(1);
+            }
+            return;
+        }
         try
         {
             var startMinimized = e.Args.Contains("--minimized", StringComparer.OrdinalIgnoreCase);
