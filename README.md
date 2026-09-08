@@ -2,6 +2,19 @@
 
 LinkWeaver is a free Windows 11 multipath tunnel that bonds Ethernet, Wi-Fi hotspot, and USB tethering through a self-hosted Linux relay. It also preserves the original route-metric failover and Proton WireGuard preparation modes. Existing DualLink settings and relay installations remain compatible.
 
+## Documentation
+
+| Guide | Purpose |
+| --- | --- |
+| [Installation](docs/INSTALLATION.md) | Install, upgrade, verify, and uninstall the Windows application. |
+| [User guide](docs/USER-GUIDE.md) | Configure adapters and use Bonding, Failover, and Redundant modes. |
+| [AWS relay setup](docs/AWS-RELAY.md) | Create and secure the Ubuntu aggregation server from the AWS console. |
+| [WireGuard and Proton](docs/WIREGUARD-PROTON.md) | Prepare Proton configurations and understand tunnel failover. |
+| [Architecture](docs/ARCHITECTURE.md) | Protocol, scheduling, encryption, routing, NAT, liveness, and limitations. |
+| [Troubleshooting](docs/TROUBLESHOOTING.md) | Diagnose no Internet, relay errors, poor speed, high latency, and Defender warnings. |
+| [Development and releases](docs/DEVELOPMENT.md) | Build, test, package, sign, and publish LinkWeaver. |
+| [Security policy](SECURITY.md) | Trust model, credential handling, release verification, and vulnerability reports. |
+
 ## Verified fast failover — 2.2.6
 
 LinkWeaver 2.2.6 treats end-to-end reachability as authoritative when a cable
@@ -51,7 +64,7 @@ While bonding is active, DualLink shows direct Internet ping, encrypted relay RT
 
 ## Install and update
 
-Download `LinkWeaver-Setup-x64.exe` from the latest private repository release. The stable installer application ID upgrades an existing DualLink installation in place; uninstalling the previous version is not required.
+Download `LinkWeaver-Setup-x64.exe` from the [latest release](https://github.com/Abse2001/DualLink/releases/latest). The stable installer application ID upgrades an existing DualLink installation in place; uninstalling the previous version is not required.
 
 Every release also includes `SHA256SUMS.txt`. Compare its installer hash with `Get-FileHash LinkWeaver-Setup-x64.exe -Algorithm SHA256` before running the installer. LinkWeaver does not invoke PowerShell with an execution-policy bypass.
 

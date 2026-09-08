@@ -1,8 +1,8 @@
-# DualLink security
+# LinkWeaver security
 
 ## Security model
 
-DualLink changes Windows routes, creates a Wintun adapter, and can deploy its relay over OpenSSH. These operations require administrator privileges and should only be performed from an official release whose checksum and publisher signature have been verified.
+LinkWeaver changes Windows routes, creates a Wintun adapter, and can deploy its relay over OpenSSH. These operations require administrator privileges and should only be performed from an official release whose checksum and publisher signature have been verified.
 
 The relay key is generated locally and stored with Windows DPAPI for the current user. Relay packets are authenticated and encrypted with AES-256-GCM using per-session keys. AWS private keys are selected by the user, passed directly to Windows OpenSSH, and are never copied into DualLink settings.
 
