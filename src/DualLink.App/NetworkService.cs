@@ -9,7 +9,9 @@ namespace DualLink.App;
 
 public sealed class NetworkService
 {
-    private static readonly string[] ProbeTargets = ["1.1.1.1", "8.8.8.8"];
+    private static readonly string[] ProbeTargets = ["1.1.1.1", "8.8.8.8", "9.9.9.9", "208.67.222.222"];
+    private readonly ProbeStabilizer _probeStabilizer = new();
+    private string? _probeRouteSignature;
 
     public IReadOnlyDictionary<string, AdapterByteCounters> GetAdapterByteCounters()
     {
@@ -58,13 +60,41 @@ public sealed class NetworkService
         return !excluded.Any(value => identity.Contains(value, StringComparison.OrdinalIgnoreCase));
     }
 
-    public async Task<ProbeResult> ProbeAsync(AdapterInfo adapter, string host, bool tunnelActive, CancellationToken token)
+    public async Task<IReadOnlyDictionary<string, string>> PrepareProbeRoutesAsync(
+        IReadOnlyList<AdapterInfo> adapters, bool tunnelActive)
+    {
+        var assignments = adapters
+            .OrderBy(adapter => adapter.Id, StringComparer.OrdinalIgnoreCase)
+            .Select((adapter, index) => new { adapter, target = ProbeTargets[index % ProbeTargets.Length] })
+            .ToDictionary(x => x.adapter.Id, x => x.target, StringComparer.OrdinalIgnoreCase);
+
+        if (!tunnelActive)
+        {
+            _probeRouteSignature = null;
+            return assignments;
+        }
+
+        var signature = string.Join('|', adapters.OrderBy(x => x.Id, StringComparer.OrdinalIgnoreCase)
+            .Select(x => $"{x.Id}:{x.InterfaceIndex}:{x.Address}:{x.Gateway}:{assignments[x.Id]}"));
+        if (signature == _probeRouteSignature) return assignments;
+
+        // Route preparation is deliberately serialized. The old implementation
+        // changed host routes inside concurrent probes, allowing two adapters to
+        // race for the same destination and making healthy paths flicker offline.
+        foreach (var adapter in adapters.Where(x => x.Gateway is not null))
+            await EnsureHostRouteAsync(assignments[adapter.Id], adapter, 5);
+        _probeRouteSignature = signature;
+        return assignments;
+    }
+
+    public async Task<ProbeResult> ProbeAsync(AdapterInfo adapter, string host, bool tunnelActive,
+        CancellationToken token, string? assignedTarget = null)
     {
         // A prepared WireGuard config uses /1 routes instead of the Windows /0 kill
         // switch. A single public ICMP target is pinned to each physical adapter so
         // upstream loss (including a cellular call) is detected without routing game
         // traffic outside the tunnel.
-        var target = tunnelActive ? ProbeTargets[(adapter.InterfaceIndex & int.MaxValue) % ProbeTargets.Length] : host;
+        var target = tunnelActive ? assignedTarget : host;
         if (string.IsNullOrWhiteSpace(target))
             return new(adapter.Id, DateTimeOffset.Now, false, 0, 0, 100, 0, "No IPv4 gateway was found");
 
@@ -72,7 +102,6 @@ public sealed class NetworkService
         {
             if (adapter.Gateway is null)
                 return new(adapter.Id, DateTimeOffset.Now, false, 0, 0, 100, 0, "No IPv4 gateway was found");
-            await EnsureHostRouteAsync(target, adapter, 5);
         }
 
         const int sampleCount = 2;
@@ -96,7 +125,8 @@ public sealed class NetworkService
         var latency = online ? samples.Average() : 0;
         var jitter = samples.Count > 1 ? samples.Zip(samples.Skip(1), (a, b) => Math.Abs(a - b)).Average() : 0;
         var loss = failures / (double)sampleCount * 100;
-        return new(adapter.Id, DateTimeOffset.Now, online, latency, jitter, loss, LinkScorer.Calculate(online, latency, jitter, loss), error);
+        return _probeStabilizer.Filter(new(adapter.Id, DateTimeOffset.Now, online, latency, jitter, loss,
+            LinkScorer.Calculate(online, latency, jitter, loss), error));
     }
 
     public async Task<bool> VerifyBondedInternetAsync(CancellationToken token)
@@ -134,6 +164,16 @@ public sealed class NetworkService
             "$services | ForEach-Object { $_.WaitForStatus('Running', [TimeSpan]::FromSeconds(5)) }; 'restarted'";
         var result = await RunPowerShellAsync(command);
         return result.Contains("restarted", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public async Task<int?> GetPreferredRouteInterfaceAsync(IPAddress endpoint)
+    {
+        var command =
+            $"$route = Get-NetRoute -DestinationPrefix '{endpoint}/32' -AddressFamily IPv4 -ErrorAction SilentlyContinue | " +
+            "Sort-Object @{Expression={$_.RouteMetric + (Get-NetIPInterface -InterfaceIndex $_.InterfaceIndex -AddressFamily IPv4).InterfaceMetric}} | Select-Object -First 1; " +
+            "if ($route) { $route.InterfaceIndex }";
+        var result = await RunPowerShellAsync(command);
+        return int.TryParse(result.Trim(), out var index) ? index : null;
     }
 
     public async Task<double?> MeasureBondedInternetLatencyAsync(CancellationToken token)
