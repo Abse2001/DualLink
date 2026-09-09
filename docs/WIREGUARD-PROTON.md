@@ -33,7 +33,7 @@ Do not activate a separate full-tunnel Proton configuration while testing LinkWe
 
 The generated configuration replaces IPv4/IPv6 default prefixes with two half-default routes. This avoids WireGuard for Windows's special `/0` kill-switch behavior while still routing Internet traffic through Proton. LinkWeaver resolves and stores the endpoint IPv4 address, then maintains explicit `/32` endpoint routes through physical gateways.
 
-## Failover behavior in 2.2.6
+## Failover behavior in 2.2.7
 
 When the Ethernet cable stays connected but its upstream Internet dies, LinkWeaver:
 
@@ -41,9 +41,9 @@ When the Ethernet cable stays connected but its upstream Internet dies, LinkWeav
 2. raises the healthy adapter's Windows priority;
 3. moves the Proton endpoint `/32` preference to that adapter;
 4. verifies physical Internet through an interface-bound TCP socket;
-5. checks that ordinary routed traffic works through WireGuard;
-6. if WireGuard remains pinned to the old path, restarts the active `WireGuardTunnel$*` service;
-7. verifies routed Internet again before reporting recovery.
+5. verifies that the endpoint route resolves to the selected physical interface;
+6. restarts the active `WireGuardTunnel$*` service to rebind its UDP socket;
+7. verifies routed Internet before reporting that adapter as active.
 
 Refreshing WireGuard can cause a short interruption. Keeping the same Proton endpoint normally keeps the same VPN egress address, but no application can guarantee a third-party VPN retains NAT/session state.
 

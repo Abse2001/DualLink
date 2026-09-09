@@ -195,7 +195,10 @@ public partial class MainWindow : Window
             var routePreference = _lastAppliedId ?? _selectedPreferenceId ?? adapters.FirstOrDefault(x => x.Type == System.Net.NetworkInformation.NetworkInterfaceType.Ethernet)?.Id;
             if (_serverSetupCancellation is null)
                 await EnsureEndpointRoutesAsync(adapters, routePreference);
-            var probes = await Task.WhenAll(adapters.Select(x => _network.ProbeAsync(x, _settings.ProbeHost, protonActive, _stop.Token)));
+            var probeTargets = await _network.PrepareProbeRoutesAsync(adapters, protonActive);
+            var probes = await Task.WhenAll(adapters.Select(x => _network.ProbeAsync(
+                x, _settings.ProbeHost, protonActive, _stop.Token,
+                probeTargets.TryGetValue(x.Id, out var target) ? target : null)));
             var decision = ChooseConnection(probes);
             var confirmedActiveId = _lastAppliedId;
             if (_serverSetupCancellation is null && _bonding is null && AutoCheck.IsChecked == true && decision.ActiveAdapterId is not null && decision.Changed)
@@ -205,11 +208,24 @@ public partial class MainWindow : Window
                 await EnsureEndpointRoutesAsync(adapters, requested.Id, force: true);
                 if (await _network.VerifyAdapterInternetAsync(requested, _stop.Token))
                 {
-                    _lastAppliedId = requested.Id;
-                    confirmedActiveId = requested.Id;
                     decision = decision with { Reason = $"Switched to {requested.Name}; Internet path verified" };
+                    var routeVerified = true;
                     if (protonActive)
-                        decision = decision with { Reason = await RecoverWireGuardAfterPathSwitchAsync(requested.Name, decision.Reason) };
+                    {
+                        var wireGuard = await RecoverWireGuardAfterPathSwitchAsync(requested, adapters, decision.Reason);
+                        routeVerified = wireGuard.Success;
+                        decision = decision with { Reason = wireGuard.Reason };
+                    }
+                    if (routeVerified)
+                    {
+                        _lastAppliedId = requested.Id;
+                        confirmedActiveId = requested.Id;
+                    }
+                    else
+                    {
+                        _lastAppliedId = null;
+                        confirmedActiveId = null;
+                    }
                 }
                 else
                 {
@@ -223,11 +239,19 @@ public partial class MainWindow : Window
                         await EnsureEndpointRoutesAsync(adapters, fallback.Id, force: true);
                         if (await _network.VerifyAdapterInternetAsync(fallback, _stop.Token))
                         {
-                            _lastAppliedId = fallback.Id;
-                            confirmedActiveId = fallback.Id;
                             decision = new(fallback.Id, true, $"{requested.Name} failed verification; switched to verified {fallback.Name}");
+                            var routeVerified = true;
                             if (protonActive)
-                                decision = decision with { Reason = await RecoverWireGuardAfterPathSwitchAsync(fallback.Name, decision.Reason) };
+                            {
+                                var wireGuard = await RecoverWireGuardAfterPathSwitchAsync(fallback, adapters, decision.Reason);
+                                routeVerified = wireGuard.Success;
+                                decision = decision with { Reason = wireGuard.Reason };
+                            }
+                            if (routeVerified)
+                            {
+                                _lastAppliedId = fallback.Id;
+                                confirmedActiveId = fallback.Id;
+                            }
                         }
                     }
                     if (confirmedActiveId is null)
@@ -299,22 +323,32 @@ public partial class MainWindow : Window
         }
     }
 
-    private async Task<string> RecoverWireGuardAfterPathSwitchAsync(string adapterName, string successReason)
+    private async Task<(bool Success, string Reason)> RecoverWireGuardAfterPathSwitchAsync(
+        AdapterInfo adapter, IReadOnlyList<AdapterInfo> adapters, string successReason)
     {
-        // The endpoint /32 route is already moved before this call. Most WireGuard
-        // tunnels roam without intervention; if routed traffic remains stuck on the
-        // old NIC, restart only the active tunnel service and verify it recovered.
-        await Task.Delay(250, _stop.Token);
-        if (await _network.VerifyRoutedInternetAsync(_stop.Token)) return successReason;
+        // A working TCP connection only proves that WireGuard still has Internet;
+        // it does not prove the tunnel moved to the newly preferred outer adapter.
+        // Rebind on every real path change so the UI cannot claim Ethernet while
+        // WireGuard's existing UDP socket continues to use Wi-Fi.
+        if (_wireGuardEndpoint is null)
+            return (false, $"{successReason}; WireGuard endpoint could not be verified");
+        var routeInterface = await _network.GetPreferredRouteInterfaceAsync(_wireGuardEndpoint);
+        if (routeInterface != adapter.InterfaceIndex)
+        {
+            await EnsureEndpointRoutesAsync(adapters, adapter.Id, force: true);
+            routeInterface = await _network.GetPreferredRouteInterfaceAsync(_wireGuardEndpoint);
+            if (routeInterface != adapter.InterfaceIndex)
+                return (false, $"{adapter.Name} was selected, but its WireGuard endpoint route is not active");
+        }
 
-        AppLog.Write($"WireGuard did not roam to {adapterName}; refreshing the active tunnel service.");
+        AppLog.Write($"Rebinding WireGuard to {adapter.Name} after endpoint route switch.");
         if (!await _network.RefreshActiveWireGuardTunnelAsync())
-            return $"{adapterName} is verified, but WireGuard is not passing traffic; reconnect the tunnel";
+            return (false, $"{adapter.Name} is verified, but WireGuard could not be rebound; reconnect the tunnel");
 
-        await Task.Delay(500, _stop.Token);
+        await Task.Delay(650, _stop.Token);
         return await _network.VerifyRoutedInternetAsync(_stop.Token)
-            ? $"Switched to {adapterName}; WireGuard automatically recovered and Internet was verified"
-            : $"{adapterName} is verified, but WireGuard recovery failed; tunnel traffic is offline";
+            ? (true, $"Switched to {adapter.Name}; WireGuard rebound and Internet was verified")
+            : (false, $"{adapter.Name} is verified, but WireGuard rebind failed; tunnel traffic is offline");
     }
 
     private async void BondingToggle_Click(object sender, RoutedEventArgs e)
