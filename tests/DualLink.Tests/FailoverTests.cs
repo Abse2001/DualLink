@@ -28,5 +28,16 @@ public class FailoverTests
         Assert.True(controller.Evaluate([Probe("a", true, 60), Probe("b", true, 90)]).Changed);
     }
 
+    [Fact]
+    public void Probe_stabilizer_rejects_single_loss_and_single_recovery()
+    {
+        var stabilizer = new ProbeStabilizer();
+        Assert.True(stabilizer.Filter(Probe("ethernet", true, 90)).Online);
+        Assert.True(stabilizer.Filter(Probe("ethernet", false, 0)).Online);
+        Assert.False(stabilizer.Filter(Probe("ethernet", false, 0)).Online);
+        Assert.False(stabilizer.Filter(Probe("ethernet", true, 90)).Online);
+        Assert.True(stabilizer.Filter(Probe("ethernet", true, 90)).Online);
+    }
+
     private static ProbeResult Probe(string id, bool online, double score) => new(id, DateTimeOffset.Now, online, 10, 1, 0, score);
 }
