@@ -10,7 +10,9 @@ namespace DualLink.App;
 public sealed class NetworkService
 {
     private static readonly string[] ProbeTargets = ["1.1.1.1", "8.8.8.8", "9.9.9.9", "208.67.222.222"];
+    private const string VerificationTarget = "1.0.0.1";
     private readonly ProbeStabilizer _probeStabilizer = new();
+    private readonly Dictionary<string, string> _probeTargetAssignments = new(StringComparer.OrdinalIgnoreCase);
     private string? _probeRouteSignature;
 
     public IReadOnlyDictionary<string, AdapterByteCounters> GetAdapterByteCounters()
@@ -63,18 +65,19 @@ public sealed class NetworkService
     public async Task<IReadOnlyDictionary<string, string>> PrepareProbeRoutesAsync(
         IReadOnlyList<AdapterInfo> adapters, bool tunnelActive)
     {
-        var assignments = adapters
-            .OrderBy(adapter => adapter.Id, StringComparer.OrdinalIgnoreCase)
-            .Select((adapter, index) => new { adapter, target = ProbeTargets[index % ProbeTargets.Length] })
-            .ToDictionary(x => x.adapter.Id, x => x.target, StringComparer.OrdinalIgnoreCase);
-
-        if (!tunnelActive)
+        // Keep an adapter's target for the lifetime of the application. Re-indexing
+        // the remaining adapters when a cable was removed made Wi-Fi inherit the
+        // Ethernet target and left stale /32 routes that could survive reconnection.
+        foreach (var adapter in adapters.Where(x => !_probeTargetAssignments.ContainsKey(x.Id)))
         {
-            _probeRouteSignature = null;
-            return assignments;
+            var used = _probeTargetAssignments.Values.ToHashSet(StringComparer.OrdinalIgnoreCase);
+            _probeTargetAssignments[adapter.Id] = ProbeTargets.FirstOrDefault(x => !used.Contains(x))
+                ?? ProbeTargets[_probeTargetAssignments.Count % ProbeTargets.Length];
         }
+        var assignments = adapters.ToDictionary(
+            x => x.Id, x => _probeTargetAssignments[x.Id], StringComparer.OrdinalIgnoreCase);
 
-        var signature = string.Join('|', adapters.OrderBy(x => x.Id, StringComparer.OrdinalIgnoreCase)
+        var signature = $"{tunnelActive}|" + string.Join('|', adapters.OrderBy(x => x.Id, StringComparer.OrdinalIgnoreCase)
             .Select(x => $"{x.Id}:{x.InterfaceIndex}:{x.Address}:{x.Gateway}:{assignments[x.Id]}"));
         if (signature == _probeRouteSignature) return assignments;
 
@@ -94,15 +97,12 @@ public sealed class NetworkService
         // switch. A single public ICMP target is pinned to each physical adapter so
         // upstream loss (including a cellular call) is detected without routing game
         // traffic outside the tunnel.
-        var target = tunnelActive ? assignedTarget : host;
+        var target = assignedTarget ?? host;
         if (string.IsNullOrWhiteSpace(target))
             return new(adapter.Id, DateTimeOffset.Now, false, 0, 0, 100, 0, "No IPv4 gateway was found");
 
-        if (tunnelActive)
-        {
-            if (adapter.Gateway is null)
-                return new(adapter.Id, DateTimeOffset.Now, false, 0, 0, 100, 0, "No IPv4 gateway was found");
-        }
+        if (adapter.Gateway is null)
+            return new(adapter.Id, DateTimeOffset.Now, false, 0, 0, 100, 0, "No IPv4 gateway was found");
 
         const int sampleCount = 2;
         async Task<(double? Latency, string? Error)> SampleAsync()
@@ -198,18 +198,24 @@ public sealed class NetworkService
         if (commands.Count > 0) await RunPowerShellAsync(string.Join("; ", commands));
     }
 
-    public async Task<bool> VerifyAdapterInternetAsync(AdapterInfo adapter, CancellationToken token)
+    public async Task<bool> VerifyAdapterInternetAsync(AdapterInfo adapter,
+        IReadOnlyList<AdapterInfo> adapters, CancellationToken token)
     {
-        if (adapter.Address is null || adapter.InterfaceIndex < 0) return false;
+        if (adapter.Address is null || adapter.Gateway is null || adapter.InterfaceIndex < 0) return false;
         try
         {
+            // Use a dedicated verification destination so per-adapter health-check
+            // routes can never redirect this end-to-end test through another NIC.
+            foreach (var candidate in adapters.Where(x => x.InterfaceIndex >= 0))
+                await RunPowerShellAsync($"Remove-NetRoute -DestinationPrefix '{VerificationTarget}/32' -InterfaceIndex {candidate.InterfaceIndex} -AddressFamily IPv4 -Confirm:$false -ErrorAction SilentlyContinue");
+            await EnsureHostRouteAsync(VerificationTarget, adapter, 1);
             using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
             socket.SetSocketOption(SocketOptionLevel.IP, (SocketOptionName)31,
                 IPAddress.HostToNetworkOrder(adapter.InterfaceIndex));
             socket.Bind(new IPEndPoint(adapter.Address, 0));
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
             deadline.CancelAfter(TimeSpan.FromMilliseconds(650));
-            await socket.ConnectAsync(new IPEndPoint(IPAddress.Parse("1.1.1.1"), 443), deadline.Token);
+            await socket.ConnectAsync(new IPEndPoint(IPAddress.Parse(VerificationTarget), 443), deadline.Token);
             return socket.Connected;
         }
         catch (Exception error) when (error is SocketException or OperationCanceledException)
@@ -269,7 +275,7 @@ public sealed class NetworkService
 
     public async Task RestoreManagedRoutesAsync(IEnumerable<AdapterInfo> adapters, IPAddress? endpoint)
     {
-        var prefixes = ProbeTargets.Select(x => $"'{x}/32'").ToList();
+        var prefixes = ProbeTargets.Append(VerificationTarget).Select(x => $"'{x}/32'").ToList();
         if (endpoint is not null) prefixes.Add($"'{endpoint}/32'");
         foreach (var adapter in adapters)
             await RunPowerShellAsync($"Remove-NetRoute -DestinationPrefix @({string.Join(',', prefixes)}) -InterfaceIndex {adapter.InterfaceIndex} -AddressFamily IPv4 -Confirm:$false -ErrorAction SilentlyContinue");

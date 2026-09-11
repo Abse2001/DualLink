@@ -44,6 +44,7 @@ public partial class MainWindow : Window
     private readonly Dictionary<string, string> _knownConnectionTypes = new(StringComparer.OrdinalIgnoreCase);
     private DateTimeOffset _lastHistorySave = DateTimeOffset.MinValue;
     private readonly SemaphoreSlim _networkChanged = new(0, 1);
+    private readonly SemaphoreSlim _refreshGate = new(1, 1);
 
     public MainWindow()
     {
@@ -181,6 +182,7 @@ public partial class MainWindow : Window
 
     private async Task RefreshAsync()
     {
+        if (!await _refreshGate.WaitAsync(0)) return;
         try
         {
             var adapters = _network.GetInternetAdapters();
@@ -201,12 +203,18 @@ public partial class MainWindow : Window
                 probeTargets.TryGetValue(x.Id, out var target) ? target : null)));
             var decision = ChooseConnection(probes);
             var confirmedActiveId = _lastAppliedId;
-            if (_serverSetupCancellation is null && _bonding is null && AutoCheck.IsChecked == true && decision.ActiveAdapterId is not null && decision.Changed)
+            // Retry when the controller's chosen path and the last end-to-end
+            // verified path disagree. Previously one failed verification updated
+            // the controller but not Windows routing, then Changed stayed false
+            // forever and the adapter could never recover without restarting.
+            var routeNeedsApply = decision.ActiveAdapterId is not null &&
+                (decision.Changed || !string.Equals(_lastAppliedId, decision.ActiveAdapterId, StringComparison.OrdinalIgnoreCase));
+            if (_serverSetupCancellation is null && _bonding is null && AutoCheck.IsChecked == true && routeNeedsApply)
             {
                 var requested = adapters.First(x => x.Id == decision.ActiveAdapterId);
                 await _network.ApplyMetricsAsync(adapters, requested.Id, _settings.PreferredMetric, _settings.BackupMetric);
                 await EnsureEndpointRoutesAsync(adapters, requested.Id, force: true);
-                if (await _network.VerifyAdapterInternetAsync(requested, _stop.Token))
+                if (await _network.VerifyAdapterInternetAsync(requested, adapters, _stop.Token))
                 {
                     decision = decision with { Reason = $"Switched to {requested.Name}; Internet path verified" };
                     var routeVerified = true;
@@ -237,7 +245,7 @@ public partial class MainWindow : Window
                     {
                         await _network.ApplyMetricsAsync(adapters, fallback.Id, _settings.PreferredMetric, _settings.BackupMetric);
                         await EnsureEndpointRoutesAsync(adapters, fallback.Id, force: true);
-                        if (await _network.VerifyAdapterInternetAsync(fallback, _stop.Token))
+                        if (await _network.VerifyAdapterInternetAsync(fallback, adapters, _stop.Token))
                         {
                             decision = new(fallback.Id, true, $"{requested.Name} failed verification; switched to verified {fallback.Name}");
                             var routeVerified = true;
@@ -320,6 +328,10 @@ public partial class MainWindow : Window
             StatusText.Text = ex.Message;
             StatusDot.Fill = MediaBrushes.Red;
             AppLog.Write(ex.ToString());
+        }
+        finally
+        {
+            _refreshGate.Release();
         }
     }
 
