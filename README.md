@@ -15,12 +15,13 @@ LinkWeaver is a free Windows 11 multipath tunnel that bonds Ethernet, Wi-Fi hots
 | [Development and releases](docs/DEVELOPMENT.md) | Build, test, package, sign, and publish LinkWeaver. |
 | [Security policy](SECURITY.md) | Trust model, credential handling, release verification, and vulnerability reports. |
 
-## Stable adapter and WireGuard switching — 2.2.7
+## Reliable disconnect and recovery — 2.2.8
 
-LinkWeaver 2.2.7 treats end-to-end reachability as authoritative when a cable
+LinkWeaver 2.2.8 treats end-to-end reachability as authoritative when a cable
 remains connected but its upstream Internet service fails. Physical probes run
-concurrently using a stable, unique target per adapter, preventing probe host-route
-races and false Offline/online flicker. Direct-mode route changes are verified
+concurrently using a persistent, unique target per adapter, preventing probe host-route
+races, stale routes after reconnection, and false Offline/online flicker. Failed
+route verification is retried until the chosen and verified paths agree. Direct-mode route changes are verified
 through the selected interface, and stale relay paths expire after 750 ms. Every
 actual WireGuard path change now validates the endpoint route, rebinds the active
 tunnel service, and verifies routed Internet before the UI confirms the adapter.
