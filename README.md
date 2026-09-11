@@ -15,9 +15,9 @@ LinkWeaver is a free Windows 11 multipath tunnel that bonds Ethernet, Wi-Fi hots
 | [Development and releases](docs/DEVELOPMENT.md) | Build, test, package, sign, and publish LinkWeaver. |
 | [Security policy](SECURITY.md) | Trust model, credential handling, release verification, and vulnerability reports. |
 
-## Reliable disconnect and recovery — 2.2.8
+## Traffic-verified adapter health — 2.2.9
 
-LinkWeaver 2.2.8 treats end-to-end reachability as authoritative when a cable
+LinkWeaver 2.2.9 treats end-to-end reachability as authoritative when a cable
 remains connected but its upstream Internet service fails. Physical probes run
 concurrently using a persistent, unique target per adapter, preventing probe host-route
 races, stale routes after reconnection, and false Offline/online flicker. Failed
@@ -25,6 +25,11 @@ route verification is retried until the chosen and verified paths agree. Direct-
 through the selected interface, and stale relay paths expire after 750 ms. Every
 actual WireGuard path change now validates the endpoint route, rebinds the active
 tunnel service, and verifies routed Internet before the UI confirms the adapter.
+
+Adapter health uses interface-bound TCP handshakes instead of ICMP-only ping. This
+prevents Ethernet from being marked Offline when a router, ISP, or VPN path blocks
+ICMP while ordinary Internet traffic is still passing. Missing adapter identities
+are removed from verified UI state immediately.
 
 Tunnel paths are health-probed every 150 ms. Four missed replies mark a path unavailable in about 600 ms, and a packet that encounters a socket failure is retried immediately on the healthiest remaining path. Windows adapter-change notifications wake direct failover immediately, with a 250 ms verification cadence for upstream failures. Recovered paths are probed and automatically rejoined.
 

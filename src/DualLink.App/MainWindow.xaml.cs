@@ -186,6 +186,13 @@ public partial class MainWindow : Window
         try
         {
             var adapters = _network.GetInternetAdapters();
+            if (_lastAppliedId is not null && !adapters.Any(x =>
+                    string.Equals(x.Id, _lastAppliedId, StringComparison.OrdinalIgnoreCase)))
+            {
+                AppLog.Write("Previously active adapter is no longer present; clearing verified route state.");
+                _lastAppliedId = null;
+                _controller = new FailoverController(_settings);
+            }
             if (_bonding is not null)
             {
                 var livePaths = adapters.Where(adapter => adapter.Address is not null && adapter.Gateway is not null)
@@ -707,7 +714,7 @@ public partial class MainWindow : Window
 
         _preferredRecoveryWins = 0;
         var backup = probes.Where(x => x.Online).OrderByDescending(x => x.Score).FirstOrDefault();
-        if (backup is null) return new(_lastAppliedId, false, "Preferred connection is offline; no working backup found");
+        if (backup is null) return new(null, _lastAppliedId is not null, "Preferred connection is offline; no working backup found");
         return new(backup.AdapterId, _lastAppliedId != backup.AdapterId, "Preferred connection failed; using the healthiest backup");
     }
 

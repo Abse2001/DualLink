@@ -9,7 +9,7 @@ namespace DualLink.App;
 
 public sealed class NetworkService
 {
-    private static readonly string[] ProbeTargets = ["1.1.1.1", "8.8.8.8", "9.9.9.9", "208.67.222.222"];
+    private static readonly string[] ProbeTargets = ["1.1.1.1", "8.8.8.8", "8.8.4.4", "9.9.9.9"];
     private const string VerificationTarget = "1.0.0.1";
     private readonly ProbeStabilizer _probeStabilizer = new();
     private readonly Dictionary<string, string> _probeTargetAssignments = new(StringComparer.OrdinalIgnoreCase);
@@ -109,11 +109,24 @@ public sealed class NetworkService
         {
             try
             {
-                var result = await RunAsync("ping.exe", $"-4 -n 1 -w 350 -S {adapter.Address} {target}", token);
-                var match = Regex.Match(result, @"time[=<](\d+)ms", RegexOptions.IgnoreCase);
-                return match.Success ? (double.Parse(match.Groups[1].Value), null) : (null, "Probe timed out");
+                // ICMP can be dropped by routers, mobile carriers, VPN routes, or
+                // endpoint policy even while real Internet traffic works. Test an
+                // actual TCP handshake through the exact physical interface.
+                using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+                socket.SetSocketOption(SocketOptionLevel.IP, (SocketOptionName)31,
+                    IPAddress.HostToNetworkOrder(adapter.InterfaceIndex));
+                socket.Bind(new IPEndPoint(adapter.Address!, 0));
+                using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+                deadline.CancelAfter(TimeSpan.FromMilliseconds(450));
+                var stopwatch = Stopwatch.StartNew();
+                await socket.ConnectAsync(new IPEndPoint(IPAddress.Parse(target), 443), deadline.Token);
+                stopwatch.Stop();
+                return socket.Connected ? (stopwatch.Elapsed.TotalMilliseconds, null) : (null, "TCP probe failed");
             }
-            catch (Exception ex) { return (null, ex.Message); }
+            catch (Exception ex) when (ex is SocketException or OperationCanceledException)
+            {
+                return (null, ex is OperationCanceledException ? "Probe timed out" : ex.Message);
+            }
         }
         // Run samples concurrently: a dead upstream is detected in one timeout
         // window instead of waiting for two sequential 350 ms timeouts.

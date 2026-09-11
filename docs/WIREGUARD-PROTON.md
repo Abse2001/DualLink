@@ -33,7 +33,7 @@ Do not activate a separate full-tunnel Proton configuration while testing LinkWe
 
 The generated configuration replaces IPv4/IPv6 default prefixes with two half-default routes. This avoids WireGuard for Windows's special `/0` kill-switch behavior while still routing Internet traffic through Proton. LinkWeaver resolves and stores the endpoint IPv4 address, then maintains explicit `/32` endpoint routes through physical gateways.
 
-## Failover behavior in 2.2.8
+## Failover behavior in 2.2.9
 
 When the Ethernet cable stays connected but its upstream Internet dies, LinkWeaver:
 

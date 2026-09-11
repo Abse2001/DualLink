@@ -47,7 +47,7 @@ sudo ss -lunp | grep ':443 '
 
 ## Ethernet Internet dies but the cable stays connected
 
-Install 2.2.8 or later and update the relay using **Setup server** once. The UI must say the replacement adapter is **verified** or list it under **Tunnel**. A green link-state icon alone is not proof of upstream Internet.
+Install 2.2.9 or later and update the relay using **Setup server** once. The UI must say the replacement adapter is **verified** or list it under **Tunnel**. A green link-state icon alone is not proof of upstream Internet.
 
 If Proton WireGuard remains offline after a switch, LinkWeaver attempts an automatic tunnel service refresh. If the status explicitly says recovery failed, deactivate/reactivate the WireGuard tunnel and inspect `%LOCALAPPDATA%\DualLink\duallink.log`.
 
