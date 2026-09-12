@@ -168,17 +168,6 @@ public sealed class NetworkService
         }
     }
 
-    public async Task<bool> RefreshActiveWireGuardTunnelAsync()
-    {
-        const string command =
-            "$services = @(Get-Service -Name 'WireGuardTunnel$*' -ErrorAction SilentlyContinue | Where-Object Status -eq 'Running'); " +
-            "if ($services.Count -eq 0) { 'none'; exit 0 }; " +
-            "$services | Restart-Service -Force -ErrorAction Stop; " +
-            "$services | ForEach-Object { $_.WaitForStatus('Running', [TimeSpan]::FromSeconds(5)) }; 'restarted'";
-        var result = await RunPowerShellAsync(command);
-        return result.Contains("restarted", StringComparison.OrdinalIgnoreCase);
-    }
-
     public async Task<int?> GetPreferredRouteInterfaceAsync(IPAddress endpoint)
     {
         var command =
