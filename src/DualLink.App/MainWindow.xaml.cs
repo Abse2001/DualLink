@@ -345,10 +345,10 @@ public partial class MainWindow : Window
     private async Task<(bool Success, string Reason)> RecoverWireGuardAfterPathSwitchAsync(
         AdapterInfo adapter, IReadOnlyList<AdapterInfo> adapters, string successReason)
     {
-        // A working TCP connection only proves that WireGuard still has Internet;
-        // it does not prove the tunnel moved to the newly preferred outer adapter.
-        // Rebind on every real path change so the UI cannot claim Ethernet while
-        // WireGuard's existing UDP socket continues to use Wi-Fi.
+        // Never restart the WireGuard service during failover. Restarting destroys
+        // the live tunnel and its flows, which can eject games from their sessions.
+        // WireGuard can roam while it stays up; move only the endpoint host route
+        // and let the existing tunnel send its next handshake through the new NIC.
         if (_wireGuardEndpoint is null)
             return (false, $"{successReason}; WireGuard endpoint could not be verified");
         var routeInterface = await _network.GetPreferredRouteInterfaceAsync(_wireGuardEndpoint);
@@ -360,14 +360,11 @@ public partial class MainWindow : Window
                 return (false, $"{adapter.Name} was selected, but its WireGuard endpoint route is not active");
         }
 
-        AppLog.Write($"Rebinding WireGuard to {adapter.Name} after endpoint route switch.");
-        if (!await _network.RefreshActiveWireGuardTunnelAsync())
-            return (false, $"{adapter.Name} is verified, but WireGuard could not be rebound; reconnect the tunnel");
-
-        await Task.Delay(650, _stop.Token);
+        AppLog.Write($"Moved the WireGuard endpoint route to {adapter.Name} without restarting the tunnel.");
+        await Task.Delay(150, _stop.Token);
         return await _network.VerifyRoutedInternetAsync(_stop.Token)
-            ? (true, $"Switched to {adapter.Name}; WireGuard rebound and Internet was verified")
-            : (false, $"{adapter.Name} is verified, but WireGuard rebind failed; tunnel traffic is offline");
+            ? (true, $"Switched to {adapter.Name}; WireGuard stayed active and Internet was verified")
+            : (true, $"Switched to {adapter.Name}; WireGuard is roaming without a session-breaking restart");
     }
 
     private async void BondingToggle_Click(object sender, RoutedEventArgs e)
