@@ -25,7 +25,6 @@ public partial class MainWindow : Window
     private FailoverController _controller;
     private string? _selectedPreferenceId;
     private string? _lastAppliedId;
-    private int _preferredRecoveryWins;
     private bool _updatingChoices;
     private System.Net.IPAddress? _wireGuardEndpoint;
     private string? _endpointRouteSignature;
@@ -775,24 +774,18 @@ public partial class MainWindow : Window
         if (_selectedPreferenceId is null) return _controller.Evaluate(probes);
 
         var preferred = probes.FirstOrDefault(x => x.AdapterId == _selectedPreferenceId);
-        var current = probes.FirstOrDefault(x => x.AdapterId == _lastAppliedId);
         if (preferred?.Online == true)
         {
-            if (_lastAppliedId is null || _lastAppliedId == preferred.AdapterId || current?.Online != true)
-            {
-                _preferredRecoveryWins = 0;
-                return new(preferred.AdapterId, _lastAppliedId != preferred.AdapterId, "Using your preferred connection");
-            }
-
-            _preferredRecoveryWins++;
-            if (_preferredRecoveryWins < 10)
-                return new(_lastAppliedId, false, $"Preferred connection recovered; waiting for stability ({_preferredRecoveryWins}/10)");
-
-            _preferredRecoveryWins = 0;
-            return new(preferred.AdapterId, true, "Preferred connection is stable again");
+            // A manual preference is persistent policy, not a one-time hint.
+            // ProbeAsync already requires a real interface-bound TCP success, and
+            // routing is verified again before _lastAppliedId changes. Reclaim the
+            // preferred path on its first recovery round.
+            return new(preferred.AdapterId, _lastAppliedId != preferred.AdapterId,
+                _lastAppliedId == preferred.AdapterId
+                    ? "Using your preferred connection"
+                    : "Preferred connection recovered; reclaiming it immediately");
         }
 
-        _preferredRecoveryWins = 0;
         var backup = probes.Where(x => x.Online).OrderByDescending(x => x.Score).FirstOrDefault();
         if (backup is null) return new(null, _lastAppliedId is not null, "Preferred connection is offline; no working backup found");
         return new(backup.AdapterId, _lastAppliedId != backup.AdapterId, "Preferred connection failed; using the healthiest backup");
@@ -827,7 +820,6 @@ public partial class MainWindow : Window
     {
         if (_updatingChoices || PreferredCombo.SelectedItem is not AdapterChoice choice) return;
         _selectedPreferenceId = choice.Id;
-        _preferredRecoveryWins = 0;
         _controller = new FailoverController(_settings);
         AppLog.Write($"Preference changed to {choice.DisplayName}");
     }

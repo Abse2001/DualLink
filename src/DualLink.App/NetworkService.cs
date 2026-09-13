@@ -149,7 +149,7 @@ public sealed class NetworkService
                     IPAddress.HostToNetworkOrder(adapter.InterfaceIndex));
                 socket.Bind(new IPEndPoint(adapter.Address!, 0));
                 using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
-                deadline.CancelAfter(TimeSpan.FromMilliseconds(450));
+                deadline.CancelAfter(TimeSpan.FromMilliseconds(225));
                 var stopwatch = Stopwatch.StartNew();
                 await socket.ConnectAsync(new IPEndPoint(IPAddress.Parse(target), 443), deadline.Token);
                 stopwatch.Stop();

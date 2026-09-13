@@ -5,6 +5,10 @@ namespace DualLink.Tests;
 
 public class FailoverTests
 {
+    [Fact]
+    public void Default_monitor_cadence_is_fast_failover_profile() =>
+        Assert.Equal(75, new DualLinkSettings().ProbeIntervalMilliseconds);
+
     [Fact] public void Offline_link_scores_zero() => Assert.Equal(0, LinkScorer.Calculate(false, 1, 0, 0));
     [Fact] public void Clean_low_latency_link_scores_high() => Assert.True(LinkScorer.Calculate(true, 20, 2, 0) > 90);
 
