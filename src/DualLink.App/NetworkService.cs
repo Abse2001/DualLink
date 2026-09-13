@@ -13,7 +13,6 @@ public sealed class NetworkService
     private static readonly HttpClient PublicIpClient = new() { Timeout = TimeSpan.FromSeconds(2) };
     private static readonly string[] ProbeTargets = ["1.1.1.1", "8.8.8.8", "8.8.4.4", "9.9.9.9"];
     private const string VerificationTarget = "1.0.0.1";
-    private readonly ProbeStabilizer _probeStabilizer = new();
     private readonly Dictionary<string, string> _probeTargetAssignments = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _observedPhysicalAdapters = new(StringComparer.OrdinalIgnoreCase);
     private string? _probeRouteSignature;
@@ -171,8 +170,14 @@ public sealed class NetworkService
         var latency = online ? samples.Average() : 0;
         var jitter = samples.Count > 1 ? samples.Zip(samples.Skip(1), (a, b) => Math.Abs(a - b)).Average() : 0;
         var loss = failures / (double)sampleCount * 100;
-        return _probeStabilizer.Filter(new(adapter.Id, DateTimeOffset.Now, online, latency, jitter, loss,
-            LinkScorer.Calculate(online, latency, jitter, loss), error));
+        // Both attempts are interface-bound and run concurrently. If neither can
+        // establish a real TCP connection, treat the upstream as dead immediately;
+        // waiting for another monitor round leaves applications on a black-holed
+        // path even though the Ethernet/Wi-Fi link itself still reports Up.
+        if (!online)
+            error = $"Internet unreachable: both interface-bound TCP probes failed ({error ?? "no response"})";
+        return new(adapter.Id, DateTimeOffset.Now, online, latency, jitter, loss,
+            LinkScorer.Calculate(online, latency, jitter, loss), error);
     }
 
     public async Task<bool> VerifyBondedInternetAsync(CancellationToken token)
