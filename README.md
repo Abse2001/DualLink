@@ -36,7 +36,9 @@ throughput, latency, and outage duration.
 Adapter health uses interface-bound TCP handshakes instead of ICMP-only ping. This
 prevents Ethernet from being marked Offline when a router, ISP, or VPN path blocks
 ICMP while ordinary Internet traffic is still passing. Missing adapter identities
-are removed from verified UI state immediately.
+are retained for diagnosis and automatic recovery. Two attempts run concurrently
+on every 250 ms monitoring cycle; if both fail, an upstream-only outage is acted
+on in that same cycle even while Windows still reports the physical link as Up.
 
 Tunnel paths are health-probed every 150 ms. Four missed replies mark a path unavailable in about 600 ms, and a packet that encounters a socket failure is retried immediately on the healthiest remaining path. Windows adapter-change notifications wake direct failover immediately, with a 250 ms verification cadence for upstream failures. Recovered paths are probed and automatically rejoined.
 
