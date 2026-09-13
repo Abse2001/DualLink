@@ -49,9 +49,14 @@ sudo ss -lunp | grep ':443 '
 
 Install 2.2.11 or later. The UI must say the replacement adapter is **verified** or list it under **Tunnel**. A green link-state icon alone is not proof of upstream Internet.
 
-Two real TCP attempts are bound to each adapter and run concurrently every 250 ms.
+Two real TCP attempts are bound to each adapter and run concurrently every 75 ms,
+with a 225 ms timeout.
 If both fail, LinkWeaver immediately classifies that adapter as `Link up — Internet
 unreachable`; it does not wait for Windows to report a cable disconnect.
+
+A manually selected preferred adapter remains preferred throughout an outage.
+The backup is temporary: the first successful preferred-path probe triggers
+end-to-end route verification and immediate reclamation of that adapter.
 
 Export the history CSV after an interruption. `State` distinguishes a physically disconnected link from a link that remains up without IPv4, without a gateway, or without upstream Internet. The export also records active-path transitions, WireGuard/bonding state, public-IP changes, probe errors, throughput, latency, and recovery duration.
 
