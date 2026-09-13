@@ -47,9 +47,11 @@ sudo ss -lunp | grep ':443 '
 
 ## Ethernet Internet dies but the cable stays connected
 
-Install 2.2.10 or later. The UI must say the replacement adapter is **verified** or list it under **Tunnel**. A green link-state icon alone is not proof of upstream Internet.
+Install 2.2.11 or later. The UI must say the replacement adapter is **verified** or list it under **Tunnel**. A green link-state icon alone is not proof of upstream Internet.
 
-If Proton WireGuard remains offline after a switch, LinkWeaver attempts an automatic tunnel service refresh. If the status explicitly says recovery failed, deactivate/reactivate the WireGuard tunnel and inspect `%LOCALAPPDATA%\DualLink\duallink.log`.
+Export the history CSV after an interruption. `State` distinguishes a physically disconnected link from a link that remains up without IPv4, without a gateway, or without upstream Internet. The export also records active-path transitions, WireGuard/bonding state, public-IP changes, probe errors, throughput, latency, and recovery duration.
+
+LinkWeaver intentionally keeps the WireGuard service running during a path switch so active sessions are not torn down. If Proton remains offline after the endpoint route moves, deactivate/reactivate WireGuard manually after the affected session is already lost, then inspect `%LOCALAPPDATA%\DualLink\duallink.log`.
 
 ## Failover shows traffic on both adapters
 
