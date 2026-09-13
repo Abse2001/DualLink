@@ -39,12 +39,21 @@ public partial class MainWindow : Window
     private readonly List<ConnectionHistorySample> _historySamples = [];
     private readonly List<ConnectionHistoryEvent> _historyEvents = [];
     private readonly ObservableCollection<HistoryEventRow> _historyEventRows = [];
-    private readonly Dictionary<string, bool> _historyState = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> _historyState = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, DateTimeOffset> _outageStarted = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _knownConnectionTypes = new(StringComparer.OrdinalIgnoreCase);
     private DateTimeOffset _lastHistorySave = DateTimeOffset.MinValue;
     private readonly SemaphoreSlim _networkChanged = new(0, 1);
     private readonly SemaphoreSlim _refreshGate = new(1, 1);
+    private readonly StablePathIdAllocator _bondingPathIds = new();
+    private readonly Dictionary<string, string> _lastAdapterAddresses = new(StringComparer.OrdinalIgnoreCase);
+    private string? _lastRecordedActiveId;
+    private bool? _lastRecordedWireGuard;
+    private bool? _lastRecordedBonding;
+    private string _publicIp = "";
+    private string _lastRecordedPublicIp = "";
+    private DateTimeOffset _lastPublicIpProbe = DateTimeOffset.MinValue;
+    private Task<string?>? _publicIpProbeTask;
 
     public MainWindow()
     {
@@ -195,8 +204,8 @@ public partial class MainWindow : Window
             }
             if (_bonding is not null)
             {
-                var livePaths = adapters.Where(adapter => adapter.Address is not null && adapter.Gateway is not null)
-                    .Select((adapter, index) => new BondingPathConfig((byte)(index + 1), adapter.Name, adapter.Address!, adapter.InterfaceIndex));
+                var livePaths = adapters.Where(IsUsablePhysicalPath)
+                    .Select(adapter => new BondingPathConfig(GetBondingPathId(adapter), adapter.Name, adapter.Address!, adapter.InterfaceIndex));
                 await _bonding.UpdatePathsAsync(livePaths);
             }
             UpdateConnectionChoices(adapters);
@@ -306,7 +315,8 @@ public partial class MainWindow : Window
                     Math.Clamp(1 - probe.PacketLossPercent / 100d, 0, 1));
             }).ToArray();
             UpdateRelayLatencyStatus(relayTelemetry.Values);
-            RecordConnectionHistory(adapters, probes, traffic);
+            UpdatePublicIpObservation();
+            RecordConnectionHistory(adapters, probes, traffic, confirmedActiveId, protonActive);
             if (_bonding is not null)
             {
                 var verifiedPaths = relayTelemetry.Values.Where(x => x.Online).Select(x => x.PathId).ToArray();
@@ -387,11 +397,11 @@ public partial class MainWindow : Window
             BondingSettingsStore.Save(relay.ToString(), key, serverReady);
             SetBondingState("Bonding: Connecting to relay…", MediaColor.FromRgb(125, 211, 252));
 
-            var adapters = _network.GetInternetAdapters().Where(x => x.Address is not null && x.Gateway is not null).ToArray();
+            var adapters = _network.GetInternetAdapters().Where(IsUsablePhysicalPath).ToArray();
             if (adapters.Length < 1) throw new InvalidOperationException("Connect at least one Internet adapter: Ethernet, Wi-Fi, or USB tethering.");
             await _network.ApplyBondingEndpointRoutesAsync(adapters, relay);
-            var paths = adapters.Select((adapter, index) => new BondingPathConfig(
-                (byte)(index + 1), adapter.Name, adapter.Address!, adapter.InterfaceIndex));
+            var paths = adapters.Select(adapter => new BondingPathConfig(
+                GetBondingPathId(adapter), adapter.Name, adapter.Address!, adapter.InterfaceIndex));
             _bonding = new BondingEngine(paths, relay, 443, key, () => _bondingSamples);
             _bonding.Mode = SelectedBondingMode();
             StatusText.Text = "Testing encrypted relay connectivity on every physical path…";
@@ -499,6 +509,31 @@ public partial class MainWindow : Window
 
     private sealed record TrafficDisplay(double UploadMbps, double DownloadMbps, string Upload, string Download);
 
+    private static bool IsUsablePhysicalPath(AdapterInfo adapter) =>
+        adapter.Status == OperationalStatus.Up && adapter.Address is not null && adapter.Gateway is not null;
+
+    private byte GetBondingPathId(AdapterInfo adapter) => _bondingPathIds.GetOrAdd(adapter.Id);
+
+    private void UpdatePublicIpObservation()
+    {
+        var now = DateTimeOffset.UtcNow;
+        if (_publicIpProbeTask is { IsCompleted: true })
+        {
+            try
+            {
+                var observed = _publicIpProbeTask.GetAwaiter().GetResult();
+                if (!string.IsNullOrWhiteSpace(observed)) _publicIp = observed;
+            }
+            catch (OperationCanceledException) { }
+            _publicIpProbeTask = null;
+        }
+        if (_publicIpProbeTask is null && now - _lastPublicIpProbe >= TimeSpan.FromSeconds(5))
+        {
+            _lastPublicIpProbe = now;
+            _publicIpProbeTask = _network.GetPublicIpAsync(_stop.Token);
+        }
+    }
+
     private void LoadConnectionHistory()
     {
         var data = ConnectionHistoryStore.Load();
@@ -507,11 +542,16 @@ public partial class MainWindow : Window
         _historyEvents.AddRange(data.Events.Where(x => x.Timestamp >= cutoff));
         foreach (var sample in _historySamples)
             _knownConnectionTypes[sample.Connection] = sample.Type;
+        foreach (var latest in _historySamples.GroupBy(x => x.Connection, StringComparer.OrdinalIgnoreCase)
+                     .Select(group => group.OrderByDescending(x => x.Timestamp).First()))
+            _historyState[latest.Connection] = string.IsNullOrWhiteSpace(latest.State)
+                ? (latest.Online ? "Online" : "Unknown")
+                : latest.State;
         RebuildHistoryEventRows();
     }
 
     private void RecordConnectionHistory(IReadOnlyList<AdapterInfo> adapters, IReadOnlyCollection<ProbeResult> probes,
-        IReadOnlyDictionary<string, TrafficDisplay> traffic)
+        IReadOnlyDictionary<string, TrafficDisplay> traffic, string? activeAdapterId, bool wireGuardActive)
     {
         var now = DateTimeOffset.UtcNow;
         var current = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -522,12 +562,38 @@ public partial class MainWindow : Window
             _knownConnectionTypes[adapter.Name] = type;
             var probe = probes.First(x => x.AdapterId == adapter.Id);
             traffic.TryGetValue(adapter.Id, out var rates);
-            AddHistorySample(now, adapter.Name, type, probe.Online, probe.Score, probe.LatencyMs,
-                rates?.DownloadMbps ?? 0, rates?.UploadMbps ?? 0);
+            var state = ClassifyConnectivity(adapter, probe);
+            AddHistorySample(now, adapter.Name, type, state, probe.Online, probe.Score, probe.LatencyMs,
+                rates?.DownloadMbps ?? 0, rates?.UploadMbps ?? 0, adapter, probe,
+                string.Equals(adapter.Id, activeAdapterId, StringComparison.OrdinalIgnoreCase), wireGuardActive);
+            var address = adapter.Address?.ToString() ?? "";
+            if (_lastAdapterAddresses.TryGetValue(adapter.Id, out var previousAddress) && previousAddress != address)
+                _historyEvents.Add(new(now, adapter.Name, "Local IPv4 changed", null,
+                    $"{(string.IsNullOrWhiteSpace(previousAddress) ? "none" : previousAddress)} → {(string.IsNullOrWhiteSpace(address) ? "none" : address)}"));
+            _lastAdapterAddresses[adapter.Id] = address;
         }
 
         foreach (var known in _knownConnectionTypes.Where(x => !current.Contains(x.Key)).ToArray())
-            AddHistorySample(now, known.Key, known.Value, false, 0, 0, 0, 0);
+            AddHistorySample(now, known.Key, known.Value, "Adapter unavailable", false, 0, 0, 0, 0,
+                null, null, false, wireGuardActive);
+
+        if (_lastRecordedActiveId != activeAdapterId)
+        {
+            var activeName = adapters.FirstOrDefault(x => x.Id == activeAdapterId)?.Name ?? "none";
+            var previousName = adapters.FirstOrDefault(x => x.Id == _lastRecordedActiveId)?.Name ?? _lastRecordedActiveId ?? "none";
+            _historyEvents.Add(new(now, "LinkWeaver", "Active path changed", null, $"{previousName} → {activeName}"));
+            _lastRecordedActiveId = activeAdapterId;
+        }
+        if (_lastRecordedWireGuard is not null && _lastRecordedWireGuard != wireGuardActive)
+            _historyEvents.Add(new(now, "LinkWeaver", wireGuardActive ? "WireGuard detected" : "WireGuard not detected", null));
+        _lastRecordedWireGuard = wireGuardActive;
+        var bondingActive = _bonding is not null;
+        if (_lastRecordedBonding is not null && _lastRecordedBonding != bondingActive)
+            _historyEvents.Add(new(now, "LinkWeaver", bondingActive ? "Bonding active" : "Bonding stopped", null));
+        _lastRecordedBonding = bondingActive;
+        if (!string.IsNullOrWhiteSpace(_publicIp) && !string.IsNullOrWhiteSpace(_lastRecordedPublicIp) && _publicIp != _lastRecordedPublicIp)
+            _historyEvents.Add(new(now, "LinkWeaver", "Public IP changed", null, $"{_lastRecordedPublicIp} → {_publicIp}"));
+        if (!string.IsNullOrWhiteSpace(_publicIp)) _lastRecordedPublicIp = _publicIp;
 
         var cutoff = now.AddHours(-24);
         _historySamples.RemoveAll(x => x.Timestamp < cutoff);
@@ -541,25 +607,40 @@ public partial class MainWindow : Window
         }
     }
 
-    private void AddHistorySample(DateTimeOffset now, string connection, string type, bool online, double quality,
-        double latency, double downloadMbps, double uploadMbps)
+    private void AddHistorySample(DateTimeOffset now, string connection, string type, string state, bool online,
+        double quality, double latency, double downloadMbps, double uploadMbps, AdapterInfo? adapter,
+        ProbeResult? probe, bool activePath, bool wireGuardActive)
     {
+        var linkUp = adapter?.Status == OperationalStatus.Up;
         _historySamples.Add(new(now, connection, type, online, online ? quality : 0, online ? latency : 0,
-            online ? downloadMbps : 0, online ? uploadMbps : 0));
-        if (_historyState.TryGetValue(connection, out var previous) && previous != online)
+            downloadMbps, uploadMbps, state, linkUp, adapter?.Address is not null, adapter?.Gateway is not null,
+            adapter?.Address?.ToString() ?? "", adapter?.Gateway?.ToString() ?? "", probe?.Error ?? "",
+            activePath, wireGuardActive, _bonding is not null, _publicIp));
+        if (_historyState.TryGetValue(connection, out var previous) && previous != state && previous != "Unknown")
         {
-            if (!online)
+            if (state == "Online")
             {
-                _outageStarted[connection] = now;
-                _historyEvents.Add(new(now, connection, "Connection dropped", null));
+                var duration = _outageStarted.Remove(connection, out var started) ? (now - started).TotalSeconds : (double?)null;
+                _historyEvents.Add(new(now, connection, $"Recovered: {state}", duration, $"Previous state: {previous}"));
             }
             else
             {
-                var duration = _outageStarted.Remove(connection, out var started) ? (now - started).TotalSeconds : (double?)null;
-                _historyEvents.Add(new(now, connection, "Connection recovered", duration));
+                if (!online && !_outageStarted.ContainsKey(connection)) _outageStarted[connection] = now;
+                _historyEvents.Add(new(now, connection, state, null,
+                    $"Previous state: {previous}; {probe?.Error ?? "no probe detail"}"));
             }
         }
-        _historyState[connection] = online;
+        _historyState[connection] = state;
+    }
+
+    private static string ClassifyConnectivity(AdapterInfo adapter, ProbeResult probe)
+    {
+        if (adapter.Status != OperationalStatus.Up) return "Physical link disconnected";
+        if (adapter.Address is null) return "Link up — no IPv4 address";
+        if (adapter.Gateway is null) return "Link up — no gateway";
+        if (!probe.Online) return "Link up — Internet unreachable";
+        if (probe.PacketLossPercent >= 50 || probe.Score < 40) return "Internet degraded";
+        return "Online";
     }
 
     private void RebuildHistoryEventRows()
@@ -567,7 +648,7 @@ public partial class MainWindow : Window
         _historyEventRows.Clear();
         foreach (var item in _historyEvents.OrderByDescending(x => x.Timestamp).Take(250))
             _historyEventRows.Add(new(item.Timestamp.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss"), item.Connection,
-                item.Event, item.DurationSeconds is { } seconds ? FormatDuration(seconds) : "—"));
+                item.Event, item.DurationSeconds is { } seconds ? FormatDuration(seconds) : "—", item.Details));
     }
 
     private static string FormatDuration(double seconds) => seconds < 60 ? $"{seconds:0} sec" : $"{TimeSpan.FromSeconds(seconds):m\\:ss}";
@@ -642,7 +723,9 @@ public partial class MainWindow : Window
             Canvas.SetLeft(legend, left + (colorIndex - 1) * 130); Canvas.SetTop(legend, height - 22); HistoryCanvas.Children.Add(legend);
         }
 
-        foreach (var drop in _historyEvents.Where(x => x.Timestamp >= start && x.Event == "Connection dropped"))
+        foreach (var drop in _historyEvents.Where(x => x.Timestamp >= start && x.Event is
+                     "Physical link disconnected" or "Link up — no IPv4 address" or
+                     "Link up — no gateway" or "Link up — Internet unreachable" or "Adapter unavailable"))
         {
             var x = left + plotWidth * Math.Clamp((drop.Timestamp - start).TotalSeconds / (end - start).TotalSeconds, 0, 1);
             HistoryCanvas.Children.Add(new Line { X1 = x, X2 = x, Y1 = top, Y2 = top + plotHeight, Stroke = MediaBrushes.Red, StrokeThickness = 2, StrokeDashArray = new DoubleCollection([4, 3]), ToolTip = $"{drop.Connection} dropped at {drop.Timestamp.ToLocalTime():HH:mm:ss}" });
@@ -734,6 +817,9 @@ public partial class MainWindow : Window
             identity.Contains("RNDIS", StringComparison.OrdinalIgnoreCase) ||
             identity.Contains("iPhone", StringComparison.OrdinalIgnoreCase) ||
             identity.Contains("Apple Mobile", StringComparison.OrdinalIgnoreCase)) return "USB tethering";
+        if (identity.Contains("Bluetooth", StringComparison.OrdinalIgnoreCase) ||
+            identity.Contains("Personal Area Network", StringComparison.OrdinalIgnoreCase) ||
+            adapter.Type == NetworkInterfaceType.Ppp) return "Bluetooth/PPP tethering";
         return adapter.Type == System.Net.NetworkInformation.NetworkInterfaceType.Wireless80211 ? "Wi-Fi" : "Ethernet";
     }
 
@@ -800,18 +886,27 @@ public sealed record AdapterRow(string Name, string Type, string Address, string
 {
     public static AdapterRow From(AdapterInfo adapter, ProbeResult probe, bool active, string upload = "—", string download = "—", string relayLatency = "—") => new(
         adapter.Name, FriendlyType(adapter), adapter.Address?.ToString() ?? "—",
-        probe.Online ? $"{probe.LatencyMs:0} ms" : "Offline",
+        probe.Online ? $"{probe.LatencyMs:0} ms" : OfflineLabel(adapter),
         relayLatency,
         probe.Online ? $"{probe.JitterMs:0} ms" : "—",
         $"{probe.PacketLossPercent:0}%", $"{probe.Score:0}", upload, download, active ? "Preferred" : "Backup");
+
+    private static string OfflineLabel(AdapterInfo adapter)
+    {
+        if (adapter.Status != OperationalStatus.Up) return "Link disconnected";
+        if (adapter.Address is null) return "No IPv4";
+        if (adapter.Gateway is null) return "No gateway";
+        return "No Internet";
+    }
 
     private static string FriendlyType(AdapterInfo adapter)
     {
         var identity = $"{adapter.Name} {adapter.Description}";
         if (identity.Contains("USB", StringComparison.OrdinalIgnoreCase) || identity.Contains("RNDIS", StringComparison.OrdinalIgnoreCase) || identity.Contains("iPhone", StringComparison.OrdinalIgnoreCase)) return "USB tethering";
+        if (identity.Contains("Bluetooth", StringComparison.OrdinalIgnoreCase) || identity.Contains("Personal Area Network", StringComparison.OrdinalIgnoreCase) || adapter.Type == NetworkInterfaceType.Ppp) return "Bluetooth/PPP tethering";
         return adapter.Type == System.Net.NetworkInformation.NetworkInterfaceType.Wireless80211 ? "Wi-Fi" : "Ethernet";
     }
 }
 
 public sealed record AdapterChoice(string? Id, string DisplayName);
-public sealed record HistoryEventRow(string Time, string Connection, string Event, string Duration);
+public sealed record HistoryEventRow(string Time, string Connection, string Event, string Duration, string Details);
