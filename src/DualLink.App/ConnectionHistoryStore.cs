@@ -11,8 +11,24 @@ public sealed record ConnectionHistorySample(
     double Quality,
     double LatencyMs,
     double DownloadMbps = 0,
-    double UploadMbps = 0);
-public sealed record ConnectionHistoryEvent(DateTimeOffset Timestamp, string Connection, string Event, double? DurationSeconds);
+    double UploadMbps = 0,
+    string State = "Unknown",
+    bool LinkUp = false,
+    bool HasIpv4Address = false,
+    bool HasGateway = false,
+    string Address = "",
+    string Gateway = "",
+    string ProbeError = "",
+    bool ActivePath = false,
+    bool WireGuardActive = false,
+    bool BondingActive = false,
+    string PublicIp = "");
+public sealed record ConnectionHistoryEvent(
+    DateTimeOffset Timestamp,
+    string Connection,
+    string Event,
+    double? DurationSeconds,
+    string Details = "");
 public sealed record ConnectionHistoryData(List<ConnectionHistorySample> Samples, List<ConnectionHistoryEvent> Events);
 
 public static class ConnectionHistoryStore
@@ -47,17 +63,22 @@ public static class ConnectionHistoryStore
     {
         static string Escape(string value) => $"\"{value.Replace("\"", "\"\"")}\"";
         using var writer = new StreamWriter(path, false, new System.Text.UTF8Encoding(true));
-        writer.WriteLine("Timestamp,Connection,Type,Online,Quality,LatencyMs,DownloadMbps,UploadMbps");
+        writer.WriteLine("Timestamp,Connection,Type,State,LinkUp,InternetReachable,HasIpv4Address,HasGateway,Address,Gateway,Quality,LatencyMs,DownloadMbps,UploadMbps,ActivePath,WireGuardActive,BondingActive,PublicIp,ProbeError");
         foreach (var item in samples.OrderBy(x => x.Timestamp))
             writer.WriteLine(string.Join(',', item.Timestamp.ToString("O"), Escape(item.Connection), Escape(item.Type),
-                item.Online.ToString(), item.Quality.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture),
+                Escape(item.State), item.LinkUp.ToString(), item.Online.ToString(), item.HasIpv4Address.ToString(),
+                item.HasGateway.ToString(), Escape(item.Address), Escape(item.Gateway),
+                item.Quality.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture),
                 item.LatencyMs.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture),
                 item.DownloadMbps.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture),
-                item.UploadMbps.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)));
+                item.UploadMbps.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture),
+                item.ActivePath.ToString(), item.WireGuardActive.ToString(), item.BondingActive.ToString(), Escape(item.PublicIp),
+                Escape(item.ProbeError)));
         writer.WriteLine();
-        writer.WriteLine("EventTimestamp,Connection,Event,DurationSeconds");
+        writer.WriteLine("EventTimestamp,Connection,Event,DurationSeconds,Details");
         foreach (var item in events.OrderBy(x => x.Timestamp))
             writer.WriteLine(string.Join(',', item.Timestamp.ToString("O"), Escape(item.Connection), Escape(item.Event),
-                item.DurationSeconds?.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture) ?? ""));
+                item.DurationSeconds?.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture) ?? "",
+                Escape(item.Details)));
     }
 }

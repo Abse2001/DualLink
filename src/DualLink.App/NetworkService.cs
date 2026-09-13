@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Net;
+using System.Net.Http;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Text.RegularExpressions;
@@ -9,10 +10,12 @@ namespace DualLink.App;
 
 public sealed class NetworkService
 {
+    private static readonly HttpClient PublicIpClient = new() { Timeout = TimeSpan.FromSeconds(2) };
     private static readonly string[] ProbeTargets = ["1.1.1.1", "8.8.8.8", "8.8.4.4", "9.9.9.9"];
     private const string VerificationTarget = "1.0.0.1";
     private readonly ProbeStabilizer _probeStabilizer = new();
     private readonly Dictionary<string, string> _probeTargetAssignments = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _observedPhysicalAdapters = new(StringComparer.OrdinalIgnoreCase);
     private string? _probeRouteSignature;
 
     public IReadOnlyDictionary<string, AdapterByteCounters> GetAdapterByteCounters()
@@ -38,10 +41,30 @@ public sealed class NetworkService
         ($"{n.Name} {n.Description}".Contains("Proton", StringComparison.OrdinalIgnoreCase) ||
          $"{n.Name} {n.Description}".Contains("WireGuard", StringComparison.OrdinalIgnoreCase)));
 
-    public IReadOnlyList<AdapterInfo> GetInternetAdapters() => NetworkInterface.GetAllNetworkInterfaces()
-        .Where(n => n.OperationalStatus == OperationalStatus.Up)
-        .Where(n => n.NetworkInterfaceType is NetworkInterfaceType.Ethernet or NetworkInterfaceType.Wireless80211)
-        .Where(IsPhysicalInternetAdapter)
+    public async Task<string?> GetPublicIpAsync(CancellationToken token)
+    {
+        try
+        {
+            var value = (await PublicIpClient.GetStringAsync("https://checkip.amazonaws.com", token)).Trim();
+            return IPAddress.TryParse(value, out var address) ? address.ToString() : null;
+        }
+        catch (Exception error) when (error is HttpRequestException or TaskCanceledException)
+        {
+            return null;
+        }
+    }
+
+    public IReadOnlyList<AdapterInfo> GetInternetAdapters()
+    {
+        var candidates = NetworkInterface.GetAllNetworkInterfaces()
+            .Where(n => n.NetworkInterfaceType is NetworkInterfaceType.Ethernet or NetworkInterfaceType.Wireless80211 or NetworkInterfaceType.Ppp)
+            .Where(IsPhysicalInternetAdapter)
+            .ToArray();
+        foreach (var adapter in candidates.Where(n => n.OperationalStatus == OperationalStatus.Up))
+            _observedPhysicalAdapters.Add(adapter.Id);
+
+        return candidates
+        .Where(n => n.OperationalStatus == OperationalStatus.Up || _observedPhysicalAdapters.Contains(n.Id))
         .Select(n =>
         {
             var props = n.GetIPProperties();
@@ -52,8 +75,9 @@ public sealed class NetworkService
             return new AdapterInfo(n.Id, n.Name, n.Description, n.NetworkInterfaceType, n.OperationalStatus,
                 props.GetIPv4Properties()?.Index ?? -1, ipv4?.Address, gateway, null);
         })
-        .Where(x => x.InterfaceIndex >= 0 && x.Address is not null)
+        .Where(x => x.InterfaceIndex >= 0)
         .ToList();
+    }
 
     private static bool IsPhysicalInternetAdapter(NetworkInterface adapter)
     {
@@ -98,11 +122,20 @@ public sealed class NetworkService
         // upstream loss (including a cellular call) is detected without routing game
         // traffic outside the tunnel.
         var target = assignedTarget ?? host;
+        if (adapter.Status != OperationalStatus.Up)
+            // A driver-reported link loss is definitive. Do not hold the dead path
+            // online for an extra stabilization cycle before failover.
+            return new(adapter.Id, DateTimeOffset.Now, false, 0, 0, 100, 0,
+                "Physical link disconnected");
+        if (adapter.Address is null)
+            return new(adapter.Id, DateTimeOffset.Now, false, 0, 0, 100, 0,
+                "Physical link is up but no IPv4 address was assigned");
         if (string.IsNullOrWhiteSpace(target))
             return new(adapter.Id, DateTimeOffset.Now, false, 0, 0, 100, 0, "No IPv4 gateway was found");
 
         if (adapter.Gateway is null)
-            return new(adapter.Id, DateTimeOffset.Now, false, 0, 0, 100, 0, "No IPv4 gateway was found");
+            return new(adapter.Id, DateTimeOffset.Now, false, 0, 0, 100, 0,
+                "Physical link is up but no IPv4 gateway was found");
 
         const int sampleCount = 2;
         async Task<(double? Latency, string? Error)> SampleAsync()

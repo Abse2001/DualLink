@@ -6,6 +6,18 @@ namespace DualLink.Tests;
 public sealed class BondingTests
 {
     [Fact]
+    public void PhysicalAdapterKeepsPathIdWhenOtherPathsDisappear()
+    {
+        var ids = new StablePathIdAllocator();
+        var ethernet = ids.GetOrAdd("ethernet-id");
+        var wifi = ids.GetOrAdd("wifi-id");
+
+        Assert.NotEqual(ethernet, wifi);
+        Assert.Equal(wifi, ids.GetOrAdd("wifi-id"));
+        Assert.Equal(ethernet, ids.GetOrAdd("ETHERNET-ID"));
+    }
+
+    [Fact]
     public void SchedulerUsesBothLinksInProportionToDeliveryRate()
     {
         var scheduler = new AdaptiveBondingScheduler();
