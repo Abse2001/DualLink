@@ -46,6 +46,7 @@ public partial class MainWindow : Window
     private readonly SemaphoreSlim _networkChanged = new(0, 1);
     private readonly SemaphoreSlim _refreshGate = new(1, 1);
     private readonly StablePathIdAllocator _bondingPathIds = new();
+    private readonly PathHealthTracker _healthTracker = new();
     private readonly Dictionary<string, string> _lastAdapterAddresses = new(StringComparer.OrdinalIgnoreCase);
     private string? _lastRecordedActiveId;
     private bool? _lastRecordedWireGuard;
@@ -54,6 +55,7 @@ public partial class MainWindow : Window
     private string _lastRecordedPublicIp = "";
     private DateTimeOffset _lastPublicIpProbe = DateTimeOffset.MinValue;
     private Task<string?>? _publicIpProbeTask;
+    private DateTimeOffset _lastWireGuardEmergencyRestart = DateTimeOffset.MinValue;
 
     public MainWindow()
     {
@@ -216,9 +218,16 @@ public partial class MainWindow : Window
             if (_serverSetupCancellation is null)
                 await EnsureEndpointRoutesAsync(adapters, routePreference);
             var probeTargets = await _network.PrepareProbeRoutesAsync(adapters, protonActive);
-            var probes = await Task.WhenAll(adapters.Select(x => _network.ProbeAsync(
+            var rawProbes = await Task.WhenAll(adapters.Select(x => _network.ProbeAsync(
                 x, _settings.ProbeHost, protonActive, _stop.Token,
                 probeTargets.TryGetValue(x.Id, out var target) ? target : null)));
+            var response = SelectedResponseProfile();
+            var probes = rawProbes.Select(probe =>
+            {
+                var adapter = adapters.First(x => x.Id == probe.AdapterId);
+                return _healthTracker.Update(probe, response.Failures, response.Recoveries,
+                    adapter.Status == OperationalStatus.Up);
+            }).ToArray();
             var decision = ChooseConnection(probes);
             var confirmedActiveId = _lastAppliedId;
             // Retry when the controller's chosen path and the last end-to-end
@@ -249,8 +258,40 @@ public partial class MainWindow : Window
                     }
                     else
                     {
-                        _lastAppliedId = null;
-                        confirmedActiveId = null;
+                        var previous = adapters.FirstOrDefault(x => x.Id == confirmedActiveId);
+                        if (previous is not null && probes.Any(x => x.AdapterId == previous.Id && x.Online))
+                        {
+                            await _network.ApplyMetricsAsync(adapters, previous.Id, _settings.PreferredMetric, _settings.BackupMetric);
+                            if (_wireGuardEndpoint is not null)
+                                await _network.MoveWireGuardEndpointRouteAsync(adapters, _wireGuardEndpoint, previous);
+                            _lastAppliedId = previous.Id;
+                            confirmedActiveId = previous.Id;
+                            decision = new(previous.Id, false,
+                                $"{requested.Name} recovered physically, but WireGuard is not ready on it; keeping verified {previous.Name}");
+                        }
+                        else
+                        {
+                            var restartAllowed = protonActive &&
+                                DateTimeOffset.UtcNow - _lastWireGuardEmergencyRestart >= TimeSpan.FromSeconds(15);
+                            if (restartAllowed && await _network.RestartActiveWireGuardTunnelServicesAsync())
+                            {
+                                _lastWireGuardEmergencyRestart = DateTimeOffset.UtcNow;
+                                await Task.Delay(500, _stop.Token);
+                                if (await _network.VerifyRoutedInternetAsync(_stop.Token))
+                                {
+                                    _lastAppliedId = requested.Id;
+                                    confirmedActiveId = requested.Id;
+                                    decision = new(requested.Id, true,
+                                        $"Recovered {requested.Name}; restarted a stuck WireGuard tunnel because no verified backup remained");
+                                }
+                            }
+                            if (confirmedActiveId is null)
+                            {
+                                _lastAppliedId = null;
+                                decision = new(null, false,
+                                    $"{requested.Name} is online, but WireGuard recovery is still pending; retrying automatically");
+                            }
+                        }
                     }
                 }
                 else
@@ -373,10 +414,13 @@ public partial class MainWindow : Window
         _endpointRouteSignature = null;
 
         AppLog.Write($"Moved the WireGuard endpoint route to {adapter.Name} without restarting the tunnel.");
-        await Task.Delay(150, _stop.Token);
-        return await _network.VerifyRoutedInternetAsync(_stop.Token)
-            ? (true, $"Switched to {adapter.Name}; WireGuard stayed active and Internet was verified")
-            : (true, $"Switched to {adapter.Name}; WireGuard is roaming without a session-breaking restart");
+        for (var attempt = 1; attempt <= 3; attempt++)
+        {
+            await Task.Delay(150, _stop.Token);
+            if (await _network.VerifyRoutedInternetAsync(_stop.Token))
+                return (true, $"Switched to {adapter.Name}; WireGuard stayed active and Internet was verified");
+        }
+        return (false, $"WireGuard did not verify Internet through recovered {adapter.Name}; retaining the last verified path and retrying");
     }
 
     private async void BondingToggle_Click(object sender, RoutedEventArgs e)
@@ -828,6 +872,25 @@ public partial class MainWindow : Window
         _selectedPreferenceId = choice.Id;
         _controller = new FailoverController(_settings);
         AppLog.Write($"Preference changed to {choice.DisplayName}");
+    }
+
+    private (int Failures, int Recoveries) SelectedResponseProfile() =>
+        (ResponseProfileCombo?.SelectedItem as ComboBoxItem)?.Tag?.ToString() switch
+        {
+            "Aggressive" => (1, 1),
+            "Fast" => (1, 2),
+            "Stable" => (3, 4),
+            _ => (2, 3)
+        };
+
+    private void ResponseProfile_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        _healthTracker.Reset();
+        WakeNetworkMonitor();
+        if (!IsLoaded) return;
+        var profile = (ResponseProfileCombo.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "Balanced";
+        StatusText.Text = $"Response profile changed to {profile}";
+        AppLog.Write($"Response profile changed to {profile}");
     }
 
     private async void ProbeNow_Click(object sender, RoutedEventArgs e) => await RefreshAsync();
