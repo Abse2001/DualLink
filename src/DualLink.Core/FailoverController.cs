@@ -52,3 +52,68 @@ public sealed class FailoverController(DualLinkSettings settings)
         _candidateWins = 0;
     }
 }
+
+public sealed class PathHealthTracker
+{
+    private readonly Dictionary<string, State> _states = new(StringComparer.OrdinalIgnoreCase);
+
+    public ProbeResult Update(ProbeResult sample, int failureConfirmations, int recoveryConfirmations,
+        bool physicalLinkUp)
+    {
+        failureConfirmations = Math.Max(1, failureConfirmations);
+        recoveryConfirmations = Math.Max(1, recoveryConfirmations);
+        if (!_states.TryGetValue(sample.AdapterId, out var state))
+        {
+            state = new State(sample.Online, sample.Online ? sample : null);
+            _states[sample.AdapterId] = state;
+            return sample;
+        }
+
+        if (!physicalLinkUp)
+        {
+            state.Online = false;
+            state.Failures = failureConfirmations;
+            state.Successes = 0;
+            return sample with { Online = false };
+        }
+
+        if (sample.Online)
+        {
+            state.LastGood = sample;
+            state.Failures = 0;
+            state.Successes++;
+            if (state.Online || state.Successes >= recoveryConfirmations)
+            {
+                state.Online = true;
+                return sample;
+            }
+            return sample with { Online = false, Error = $"Internet recovery confirmation {state.Successes}/{recoveryConfirmations}" };
+        }
+
+        state.Successes = 0;
+        state.Failures++;
+        if (!state.Online || state.Failures >= failureConfirmations)
+        {
+            state.Online = false;
+            return sample;
+        }
+
+        var lastGood = state.LastGood ?? sample;
+        return lastGood with
+        {
+            Timestamp = sample.Timestamp,
+            Online = true,
+            Error = $"Transient probe failure {state.Failures}/{failureConfirmations}"
+        };
+    }
+
+    public void Reset() => _states.Clear();
+
+    private sealed class State(bool online, ProbeResult? lastGood)
+    {
+        public bool Online { get; set; } = online;
+        public int Failures { get; set; }
+        public int Successes { get; set; }
+        public ProbeResult? LastGood { get; set; } = lastGood;
+    }
+}
