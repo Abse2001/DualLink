@@ -8,6 +8,7 @@ internal sealed class BondingEngine : IAsyncDisposable
     private readonly WintunDevice _tun;
     private readonly DualPathBondingClient _client;
     private readonly Func<IReadOnlyCollection<BondingPathSample>> _samples;
+    private readonly Func<string?> _preferredPathName;
     private readonly CancellationTokenSource _shutdown = new();
     private Task? _captureTask;
     private Task? _probeTask;
@@ -19,9 +20,11 @@ internal sealed class BondingEngine : IAsyncDisposable
         IPAddress relayAddress,
         int relayPort,
         ReadOnlySpan<byte> key,
-        Func<IReadOnlyCollection<BondingPathSample>> samples)
+        Func<IReadOnlyCollection<BondingPathSample>> samples,
+        Func<string?> preferredPathName)
     {
         _samples = samples;
+        _preferredPathName = preferredPathName;
         _tun = new WintunDevice();
         _client = new DualPathBondingClient(paths, new IPEndPoint(relayAddress, relayPort), key);
         _client.PacketReceived += packet =>
@@ -42,7 +45,7 @@ internal sealed class BondingEngine : IAsyncDisposable
     public async Task ConnectAsync(TimeSpan timeout, CancellationToken token)
     {
         _client.Start();
-        await _client.SendControlAsync(Mode, _client.GetAdaptiveSamples(_samples()), token);
+        await _client.SendControlAsync(Mode, _client.GetAdaptiveSamples(_samples()), _preferredPathName(), token);
         await _client.ProbeAllAsync(token);
         await _client.WaitForRelayAsync(timeout, token);
     }
@@ -52,7 +55,8 @@ internal sealed class BondingEngine : IAsyncDisposable
         while (!_shutdown.IsCancellationRequested)
         {
             var packet = await _tun.ReceiveAsync(_shutdown.Token);
-            await _client.SendPacketAsync(packet, _client.GetAdaptiveSamples(_samples()), Mode, _shutdown.Token);
+            await _client.SendPacketAsync(packet, _client.GetAdaptiveSamples(_samples()), Mode,
+                _preferredPathName(), _shutdown.Token);
         }
     }
 
@@ -70,7 +74,8 @@ internal sealed class BondingEngine : IAsyncDisposable
             var now = DateTimeOffset.UtcNow;
             if (now - lastControl >= TimeSpan.FromMilliseconds(300))
             {
-                await _client.SendControlAsync(Mode, _client.GetAdaptiveSamples(_samples()), _shutdown.Token);
+                await _client.SendControlAsync(Mode, _client.GetAdaptiveSamples(_samples()),
+                    _preferredPathName(), _shutdown.Token);
                 lastControl = now;
             }
         }
