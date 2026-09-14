@@ -11,7 +11,7 @@ The dashboard lists each physical adapter, its address, direct ping, relay RTT, 
 
 ## Preferred connection
 
-**Automatic — best quality** chooses the healthiest direct adapter. Selecting a preferred adapter keeps it active while healthy, immediately falls back when it fails, and waits for repeated stable results before moving back to it. This recovery delay prevents route flapping.
+**Automatic — best quality** chooses the healthiest direct adapter. Selecting a preferred adapter makes that choice authoritative in both direct mode and tunnel **Failover** mode: it remains the preferred path while healthy, falls back when it fails, and is reclaimed when it recovers. The Role column distinguishes the configured **Preferred** path from a temporarily **Backup · active** path.
 
 Windows route selection uses interface metrics. LinkWeaver also verifies a switch using a TCP connection explicitly bound to the chosen interface; it does not declare the switch successful from link state alone.
 
@@ -24,7 +24,7 @@ Windows route selection uses interface metrics. LinkWeaver also verifies a switc
 | Failover | One tunnel path carries payload; all paths receive small health/control probes. | Yes | No, until the active path fails |
 | Redundant | Sends the same payload over every healthy path; the first valid copy wins. | Yes | Duplicates rather than aggregates |
 
-Seeing a small amount of traffic on backup adapters in Failover mode is normal. Health probes and control frames are required to know that the backup is ready. Payload traffic is not intentionally split in Failover mode.
+Seeing a small amount of traffic on backup adapters in Failover mode is normal. Health probes and control frames are required to know that the backup is ready, and Windows adapter counters include those packets. Payload traffic is not intentionally split in Failover mode. In **Bonding** mode, both adapters intentionally carry payload regardless of which adapter is marked Preferred.
 
 ## Start bonding
 

@@ -12,23 +12,20 @@ public sealed record BondingPathSample(
     long QueuedBytes,
     double Reliability);
 
-/// <summary>
-/// Chooses the path with the earliest predicted delivery time while preserving
-/// throughput-proportional use of healthy links with similar latency.
-/// </summary>
 public sealed class AdaptiveBondingScheduler
 {
     private readonly Dictionary<string, double> _virtualFinishMs = [];
 
-    public string? SelectPath(IReadOnlyCollection<BondingPathSample> paths, int packetBytes, BondingMode mode)
+    public string? SelectPath(IReadOnlyCollection<BondingPathSample> paths, int packetBytes, BondingMode mode,
+        string? preferredPathId = null)
     {
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(packetBytes);
-
         var healthy = paths.Where(IsUsable).ToList();
         if (healthy.Count == 0) return null;
 
         if (mode == BondingMode.Failover)
-            return healthy.OrderBy(PathCost).First().PathId;
+            return healthy.FirstOrDefault(path => string.Equals(path.PathId, preferredPathId,
+                       StringComparison.OrdinalIgnoreCase))?.PathId
+                   ?? healthy.OrderBy(PathCost).First().PathId;
 
         var selected = healthy.MinBy(path => PredictedArrival(path, packetBytes));
         if (selected is null) return null;

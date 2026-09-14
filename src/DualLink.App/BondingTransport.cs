@@ -100,6 +100,7 @@ public sealed class DualPathBondingClient : IAsyncDisposable
         ReadOnlyMemory<byte> innerPacket,
         IReadOnlyCollection<BondingPathSample> samples,
         BondingMode mode,
+        string? preferredPathName,
         CancellationToken token)
     {
         if (mode == BondingMode.Redundant)
@@ -131,7 +132,7 @@ public sealed class DualPathBondingClient : IAsyncDisposable
             return string.Join(" + ", healthy.Select(sample => sample.PathId));
         }
 
-        var pathName = _scheduler.SelectPath(samples, innerPacket.Length, mode);
+        var pathName = _scheduler.SelectPath(samples, innerPacket.Length, mode, preferredPathName);
         if (pathName is null || !_paths.TryGetValue(pathName, out var path)) return null;
         var sequence = NextSequence();
         var frame = BondingPacketCodec.Encode(new BondingPacket(
@@ -151,7 +152,7 @@ public sealed class DualPathBondingClient : IAsyncDisposable
         catch (Exception error) when (error is SocketException or ObjectDisposedException)
         {
             MarkPathFailed(path.Config.PathId);
-            var fallbackName = _scheduler.SelectPath(GetAdaptiveSamples(samples), innerPacket.Length, mode);
+            var fallbackName = _scheduler.SelectPath(GetAdaptiveSamples(samples), innerPacket.Length, mode, preferredPathName);
             if (fallbackName is null || fallbackName == pathName || !_paths.TryGetValue(fallbackName, out var fallback)) return null;
             var retry = BondingPacketCodec.Encode(new BondingPacket(
                 BondingPacketKind.Data, fallback.Config.PathId, _sessionId, sequence, 0,
@@ -189,7 +190,8 @@ public sealed class DualPathBondingClient : IAsyncDisposable
         }
     }
 
-    public async ValueTask SendControlAsync(BondingMode mode, IReadOnlyCollection<BondingPathSample> samples, CancellationToken token)
+    public async ValueTask SendControlAsync(BondingMode mode, IReadOnlyCollection<BondingPathSample> samples,
+        string? preferredPathName, CancellationToken token)
     {
         var measured = samples
             .Where(sample => _paths.ContainsKey(sample.PathId))
@@ -199,9 +201,15 @@ public sealed class DualPathBondingClient : IAsyncDisposable
                 return new BondingControlPath(path.Config.PathId, sample.Online, sample.SmoothedRttMs,
                     sample.JitterMs, sample.LossPercent, sample.DeliveryRateMbps);
             }).ToArray();
-        var preferred = measured.Where(path => path.Online)
-            .OrderBy(path => path.RttMs / 2d + path.JitterMs + path.LossPercent * 2d)
-            .FirstOrDefault()?.PathId ?? (byte)0;
+        var selectedPreference = mode == BondingMode.Failover && !string.IsNullOrWhiteSpace(preferredPathName)
+            ? samples.FirstOrDefault(sample => sample.Online &&
+                string.Equals(sample.PathId, preferredPathName, StringComparison.OrdinalIgnoreCase))
+            : null;
+        var preferred = selectedPreference is not null && _paths.TryGetValue(selectedPreference.PathId, out var preferredPath)
+            ? preferredPath.Config.PathId
+            : measured.Where(path => path.Online)
+                .OrderBy(path => path.RttMs / 2d + path.JitterMs + path.LossPercent * 2d)
+                .FirstOrDefault()?.PathId ?? (byte)0;
         var payload = BondingControlCodec.Encode(new(mode, preferred, measured));
         foreach (var path in _paths.Values)
         {

@@ -47,6 +47,32 @@ public sealed class BondingTests
     }
 
     [Fact]
+    public void FailoverKeepsConfiguredPreferenceWhileItIsHealthy()
+    {
+        var scheduler = new AdaptiveBondingScheduler();
+        var paths = new[]
+        {
+            new BondingPathSample("ethernet", true, 65, 8, 1, 20, 0, .95),
+            new BondingPathSample("wifi", true, 20, 1, 0, 30, 0, 1)
+        };
+
+        Assert.Equal("ethernet", scheduler.SelectPath(paths, 1_300, BondingMode.Failover, "ethernet"));
+    }
+
+    [Fact]
+    public void FailoverUsesHealthyBackupWhenPreferenceFails()
+    {
+        var scheduler = new AdaptiveBondingScheduler();
+        var paths = new[]
+        {
+            new BondingPathSample("ethernet", false, 65, 8, 100, 20, 0, 0),
+            new BondingPathSample("wifi", true, 20, 1, 0, 30, 0, 1)
+        };
+
+        Assert.Equal("wifi", scheduler.SelectPath(paths, 1_300, BondingMode.Failover, "ethernet"));
+    }
+
+    [Fact]
     public void ReorderBufferDeliversPacketsInSequence()
     {
         var now = DateTimeOffset.UtcNow;
