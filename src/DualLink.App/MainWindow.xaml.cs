@@ -368,14 +368,9 @@ public partial class MainWindow : Window
         // and let the existing tunnel send its next handshake through the new NIC.
         if (_wireGuardEndpoint is null)
             return (false, $"{successReason}; WireGuard endpoint could not be verified");
-        var routeInterface = await _network.GetPreferredRouteInterfaceAsync(_wireGuardEndpoint);
-        if (routeInterface != adapter.InterfaceIndex)
-        {
-            await EnsureEndpointRoutesAsync(adapters, adapter.Id, force: true);
-            routeInterface = await _network.GetPreferredRouteInterfaceAsync(_wireGuardEndpoint);
-            if (routeInterface != adapter.InterfaceIndex)
-                return (false, $"{adapter.Name} was selected, but its WireGuard endpoint route is not active");
-        }
+        if (!await _network.MoveWireGuardEndpointRouteAsync(adapters, _wireGuardEndpoint, adapter))
+            return (false, $"{adapter.Name} recovered, but Windows did not move the WireGuard endpoint route to it");
+        _endpointRouteSignature = null;
 
         AppLog.Write($"Moved the WireGuard endpoint route to {adapter.Name} without restarting the tunnel.");
         await Task.Delay(150, _stop.Token);
