@@ -1,5 +1,5 @@
 #define MyAppName "LinkWeaver"
-#define MyAppVersion "2.2.12"
+#define MyAppVersion "2.2.13"
 #define MyAppPublisher "Abse2001"
 #define MyAppExeName "LinkWeaver.exe"
 
