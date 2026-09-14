@@ -6,6 +6,30 @@ namespace DualLink.Tests;
 public class FailoverTests
 {
     [Fact]
+    public void HealthTrackerRejectsSingleTransientFailureInBalancedMode()
+    {
+        var tracker = new PathHealthTracker();
+        var online = Probe("ethernet", true);
+        Assert.True(tracker.Update(online, 2, 3, true).Online);
+        Assert.True(tracker.Update(Probe("ethernet", false), 2, 3, true).Online);
+        Assert.False(tracker.Update(Probe("ethernet", false), 2, 3, true).Online);
+    }
+
+    [Fact]
+    public void HealthTrackerRequiresStableRecoveryButPhysicalLossIsImmediate()
+    {
+        var tracker = new PathHealthTracker();
+        tracker.Update(Probe("ethernet", true), 2, 3, true);
+        Assert.False(tracker.Update(Probe("ethernet", false), 2, 3, false).Online);
+        Assert.False(tracker.Update(Probe("ethernet", true), 2, 3, true).Online);
+        Assert.False(tracker.Update(Probe("ethernet", true), 2, 3, true).Online);
+        Assert.True(tracker.Update(Probe("ethernet", true), 2, 3, true).Online);
+    }
+
+    private static ProbeResult Probe(string id, bool online) => new(id, DateTimeOffset.UtcNow,
+        online, online ? 30 : 0, 0, online ? 0 : 100, online ? 90 : 0);
+
+    [Fact]
     public void Default_monitor_cadence_is_fast_failover_profile() =>
         Assert.Equal(75, new DualLinkSettings().ProbeIntervalMilliseconds);
 

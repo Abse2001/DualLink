@@ -15,6 +15,10 @@ The dashboard lists each physical adapter, its address, direct ping, relay RTT, 
 
 Windows route selection uses interface metrics. LinkWeaver also verifies a switch using a TCP connection explicitly bound to the chosen interface; it does not declare the switch successful from link state alone.
 
+The **Response** dropdown controls Internet-only outage confirmation. **Aggressive** reacts to one failed probe and can switch during brief jitter; **Fast** fails over after one failure but requires two successful recovery rounds; **Balanced** (recommended) requires two failures and three recovery successes; **Stable** requires three failures and four recovery successes. A physical cable/link disconnection always fails over immediately regardless of this setting.
+
+LinkWeaver normally moves WireGuard between adapters without restarting it. If no verified backup remains and the official WireGuard tunnel service is stuck after an underlay change, LinkWeaver may restart that active tunnel service as an emergency recovery, rate-limited to once every 15 seconds. It does not do this while a verified backup is carrying the tunnel.
+
 ## Modes
 
 | Mode | Behavior | Stable VPS public IP | Uses multiple paths for one flow |

@@ -184,11 +184,11 @@ jobs:
       - name: Verify release tag matches application version
         shell: bash
         run: |
-          test "${GITHUB_REF_NAME}" = "v2.2.13"
+          test "${GITHUB_REF_NAME}" = "v2.2.14"
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          name: "LinkWeaver 2.2.13 — Persistent Preferred Path"
+          name: "LinkWeaver 2.2.14 — Verified WireGuard Recovery"
           files: |
             artifacts/LinkWeaver-Setup-x64.exe
             artifacts/DualLink-Relay-linux-x64.zip
