@@ -86,7 +86,7 @@ Every release also includes `SHA256SUMS.txt`. Compare its installer hash with `G
 
 Administrator permission is required to create Wintun and change routes. **Restore Windows defaults** removes DualLink-managed tunnel routes and restores automatic interface metrics.
 
-Enable **Start with Windows** on the dashboard to launch LinkWeaver minimized after sign-in. Minimizing or closing the main window keeps bonding and monitoring active in the system tray; double-click the LinkWeaver tray icon to restore it, or use **Exit** from the tray menu to stop the application.
+Enable **Start with Windows** on the dashboard to install an elevated Task Scheduler logon task and launch LinkWeaver minimized after sign-in. Minimizing or closing the main window keeps bonding and monitoring active in the system tray. Double-click the tray icon, choose **Open LinkWeaver**, or click the pinned taskbar shortcut to restore the existing instance; LinkWeaver prevents duplicate running instances. Use **Exit** from the tray menu to stop the application.
 
 Logs: `%LOCALAPPDATA%\DualLink\duallink.log`
 
