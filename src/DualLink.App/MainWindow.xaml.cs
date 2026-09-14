@@ -31,6 +31,7 @@ public partial class MainWindow : Window
     private BondingEngine? _bonding;
     private CancellationTokenSource? _serverSetupCancellation;
     private IReadOnlyCollection<BondingPathSample> _bondingSamples = [];
+    private string? _preferredBondingPathName;
     private Dictionary<string, AdapterByteCounters> _previousAdapterCounters = new(StringComparer.OrdinalIgnoreCase);
     private DateTimeOffset _previousAdapterCountersAt = DateTimeOffset.UtcNow;
     private DateTimeOffset _lastTunnelLatencyProbe = DateTimeOffset.MinValue;
@@ -208,6 +209,8 @@ public partial class MainWindow : Window
                 await _bonding.UpdatePathsAsync(livePaths);
             }
             UpdateConnectionChoices(adapters);
+            _preferredBondingPathName = adapters.FirstOrDefault(adapter =>
+                string.Equals(adapter.Id, _selectedPreferenceId, StringComparison.OrdinalIgnoreCase))?.Name;
             var protonActive = ProtonModeCheck.IsChecked == true && _network.IsProtonTunnelActive();
             var routePreference = _lastAppliedId ?? _selectedPreferenceId ?? adapters.FirstOrDefault(x => x.Type == System.Net.NetworkInformation.NetworkInterfaceType.Ethernet)?.Id;
             if (_serverSetupCancellation is null)
@@ -296,7 +299,12 @@ public partial class MainWindow : Window
                 var probe = probes.First(x => x.AdapterId == adapter.Id);
                 traffic.TryGetValue(adapter.Id, out var pathTraffic);
                 relayTelemetry.TryGetValue(adapter.Name, out var relaySample);
-                _rows.Add(AdapterRow.From(adapter, probe, (_bonding is null ? confirmedActiveId : decision.ActiveAdapterId) == adapter.Id,
+                var configuredPreferred = _selectedPreferenceId is null
+                    ? string.Equals((_bonding is null ? confirmedActiveId : decision.ActiveAdapterId), adapter.Id, StringComparison.OrdinalIgnoreCase)
+                    : string.Equals(_selectedPreferenceId, adapter.Id, StringComparison.OrdinalIgnoreCase);
+                var active = string.Equals((_bonding is null ? confirmedActiveId : decision.ActiveAdapterId), adapter.Id,
+                    StringComparison.OrdinalIgnoreCase);
+                _rows.Add(AdapterRow.From(adapter, probe, configuredPreferred, active,
                     pathTraffic?.Upload ?? "—", pathTraffic?.Download ?? "—",
                     relaySample is { SmoothedRttMs: > 0 } ? $"{relaySample.SmoothedRttMs:0} ms" : "—"));
             }
@@ -401,7 +409,10 @@ public partial class MainWindow : Window
             await _network.ApplyBondingEndpointRoutesAsync(adapters, relay);
             var paths = adapters.Select(adapter => new BondingPathConfig(
                 GetBondingPathId(adapter), adapter.Name, adapter.Address!, adapter.InterfaceIndex));
-            _bonding = new BondingEngine(paths, relay, 443, key, () => _bondingSamples);
+            _preferredBondingPathName = adapters.FirstOrDefault(adapter =>
+                string.Equals(adapter.Id, _selectedPreferenceId, StringComparison.OrdinalIgnoreCase))?.Name;
+            _bonding = new BondingEngine(paths, relay, 443, key, () => _bondingSamples,
+                () => _preferredBondingPathName);
             _bonding.Mode = SelectedBondingMode();
             StatusText.Text = "Testing encrypted relay connectivity on every physical path…";
             await _bonding.ConnectAsync(TimeSpan.FromSeconds(6), _stop.Token);
@@ -876,12 +887,14 @@ public partial class MainWindow : Window
 
 public sealed record AdapterRow(string Name, string Type, string Address, string Latency, string RelayLatency, string Jitter, string Loss, string Score, string Upload, string Download, string Role)
 {
-    public static AdapterRow From(AdapterInfo adapter, ProbeResult probe, bool active, string upload = "—", string download = "—", string relayLatency = "—") => new(
+    public static AdapterRow From(AdapterInfo adapter, ProbeResult probe, bool preferred, bool active,
+        string upload = "—", string download = "—", string relayLatency = "—") => new(
         adapter.Name, FriendlyType(adapter), adapter.Address?.ToString() ?? "—",
         probe.Online ? $"{probe.LatencyMs:0} ms" : OfflineLabel(adapter),
         relayLatency,
         probe.Online ? $"{probe.JitterMs:0} ms" : "—",
-        $"{probe.PacketLossPercent:0}%", $"{probe.Score:0}", upload, download, active ? "Preferred" : "Backup");
+        $"{probe.PacketLossPercent:0}%", $"{probe.Score:0}", upload, download,
+        preferred ? active ? "Preferred · active" : "Preferred" : active ? "Backup · active" : "Backup");
 
     private static string OfflineLabel(AdapterInfo adapter)
     {
