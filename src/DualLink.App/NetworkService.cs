@@ -100,8 +100,12 @@ public sealed class NetworkService
         var assignments = adapters.ToDictionary(
             x => x.Id, x => _probeTargetAssignments[x.Id], StringComparer.OrdinalIgnoreCase);
 
+        // Status is part of the fingerprint because Windows may remove an active
+        // host route on media disconnect while retaining the NIC's old address and
+        // gateway. Without this, reconnecting Ethernet looked identical and its
+        // physical bypass route was never recreated under WireGuard's /1 routes.
         var signature = $"{tunnelActive}|" + string.Join('|', adapters.OrderBy(x => x.Id, StringComparer.OrdinalIgnoreCase)
-            .Select(x => $"{x.Id}:{x.InterfaceIndex}:{x.Address}:{x.Gateway}:{assignments[x.Id]}"));
+            .Select(x => $"{x.Id}:{x.Status}:{x.InterfaceIndex}:{x.Address}:{x.Gateway}:{assignments[x.Id]}"));
         if (signature == _probeRouteSignature) return assignments;
 
         // Route preparation is deliberately serialized. The old implementation
@@ -273,6 +277,23 @@ public sealed class NetworkService
         }
     }
 
+    public async Task<bool> MoveWireGuardEndpointRouteAsync(IReadOnlyList<AdapterInfo> adapters,
+        IPAddress endpoint, AdapterInfo selected)
+    {
+        // Force Windows and WireGuard to discard the route previously cached for
+        // the backup path. Install the recovered path alone first, verify it is the
+        // winning /32, then restore high-metric emergency routes for every backup.
+        foreach (var adapter in adapters.Where(x => x.InterfaceIndex >= 0))
+            await RunPowerShellAsync($"Remove-NetRoute -DestinationPrefix '{endpoint}/32' -InterfaceIndex {adapter.InterfaceIndex} -AddressFamily IPv4 -Confirm:$false -ErrorAction SilentlyContinue");
+
+        await EnsureHostRouteAsync(endpoint.ToString(), selected, 1);
+        if (await GetPreferredRouteInterfaceAsync(endpoint) != selected.InterfaceIndex) return false;
+
+        foreach (var backup in adapters.Where(x => x.Id != selected.Id && x.Gateway is not null))
+            await EnsureHostRouteAsync(endpoint.ToString(), backup, 500);
+        return await GetPreferredRouteInterfaceAsync(endpoint) == selected.InterfaceIndex;
+    }
+
     public async Task ApplyBondingEndpointRoutesAsync(IEnumerable<AdapterInfo> adapters, IPAddress endpoint)
     {
         foreach (var adapter in adapters.Where(x => x.Gateway is not null))
@@ -306,7 +327,7 @@ public sealed class NetworkService
         if (adapter.Gateway is null) return;
         var prefix = $"{destination}/32";
         var command = $"Remove-NetRoute -DestinationPrefix '{prefix}' -InterfaceIndex {adapter.InterfaceIndex} -AddressFamily IPv4 -Confirm:$false -ErrorAction SilentlyContinue; " +
-                      $"New-NetRoute -DestinationPrefix '{prefix}' -InterfaceIndex {adapter.InterfaceIndex} -NextHop '{adapter.Gateway}' -RouteMetric {metric} -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Out-Null";
+                      $"New-NetRoute -DestinationPrefix '{prefix}' -InterfaceIndex {adapter.InterfaceIndex} -NextHop '{adapter.Gateway}' -RouteMetric {metric} -PolicyStore ActiveStore -ErrorAction Stop | Out-Null";
         await RunPowerShellAsync(command);
     }
 
