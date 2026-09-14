@@ -5,16 +5,36 @@ namespace DualLink.App;
 
 public partial class App : System.Windows.Application
 {
+    private const string InstanceMutexName = @"Local\LinkWeaver.SingleInstance";
+    private const string ActivationEventName = @"Local\LinkWeaver.Activate";
     private System.Windows.Forms.NotifyIcon? _tray;
     private System.Drawing.Icon? _trayIcon;
     private MainWindow? _window;
     private bool _exitRequested;
+    private Mutex? _instanceMutex;
+    private EventWaitHandle? _activationEvent;
+    private RegisteredWaitHandle? _activationRegistration;
 
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
         DispatcherUnhandledException += OnDispatcherUnhandledException;
         AppLog.Write($"LinkWeaver starting. Arguments: {string.Join(' ', e.Args)}");
+
+        // A pinned shortcut cannot directly activate a hidden tray window. Let a
+        // second launch signal the existing process, then exit before creating
+        // another monitor, tray icon, or set of managed routes.
+        _activationEvent = new EventWaitHandle(false, EventResetMode.AutoReset, ActivationEventName);
+        _instanceMutex = new Mutex(initiallyOwned: true, InstanceMutexName, out var firstInstance);
+        if (!firstInstance)
+        {
+            AppLog.Write("A LinkWeaver instance is already running; requesting window activation.");
+            _activationEvent.Set();
+            Shutdown(0);
+            return;
+        }
+        _activationRegistration = ThreadPool.RegisterWaitForSingleObject(_activationEvent, (_, _) =>
+            Dispatcher.BeginInvoke(RestoreWindow), null, Timeout.Infinite, executeOnlyOnce: false);
         if (e.Args.Contains("--wintun-smoke", StringComparer.OrdinalIgnoreCase))
         {
             try
@@ -113,6 +133,13 @@ public partial class App : System.Windows.Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        _activationRegistration?.Unregister(null);
+        _activationEvent?.Dispose();
+        if (_instanceMutex is not null)
+        {
+            try { _instanceMutex.ReleaseMutex(); } catch (ApplicationException) { }
+            _instanceMutex.Dispose();
+        }
         _tray?.Dispose();
         _trayIcon?.Dispose();
         base.OnExit(e);

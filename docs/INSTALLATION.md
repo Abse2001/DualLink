@@ -47,7 +47,9 @@ When a release changes the Linux relay, press **Setup server** once after upgrad
 
 ## Start with Windows and tray behavior
 
-Enable **Start with Windows** to launch LinkWeaver minimized after sign-in. Closing or minimizing the window keeps the process running in the notification area. Double-click the tray icon to restore it; use **Exit** in the tray menu to fully stop LinkWeaver.
+Enable **Start with Windows** to create an elevated Windows Task Scheduler logon task and launch LinkWeaver minimized after sign-in. This is used because LinkWeaver needs administrator rights to manage routes and tunnels; the ordinary registry Run key cannot reliably start an elevated application. Disabling the option removes the task.
+
+Closing or minimizing the window keeps the process running in the notification area. Double-click the tray icon, choose **Open LinkWeaver**, or click the pinned LinkWeaver taskbar shortcut to restore the existing window. LinkWeaver permits only one running instance, so the shortcut will not start a second monitor or a second set of managed routes. Use **Exit** in the tray menu to fully stop LinkWeaver.
 
 ## Recovery and uninstall
 
