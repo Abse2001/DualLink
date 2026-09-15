@@ -280,17 +280,28 @@ public sealed class NetworkService
     public async Task<bool> MoveWireGuardEndpointRouteAsync(IReadOnlyList<AdapterInfo> adapters,
         IPAddress endpoint, AdapterInfo selected)
     {
-        // Force Windows and WireGuard to discard the route previously cached for
-        // the backup path. Install the recovered path alone first, verify it is the
-        // winning /32, then restore high-metric emergency routes for every backup.
-        foreach (var adapter in adapters.Where(x => x.InterfaceIndex >= 0))
-            await RunPowerShellAsync($"Remove-NetRoute -DestinationPrefix '{endpoint}/32' -InterfaceIndex {adapter.InterfaceIndex} -AddressFamily IPv4 -Confirm:$false -ErrorAction SilentlyContinue");
+        if (selected.Gateway is null || selected.InterfaceIndex < 0) return false;
 
-        await EnsureHostRouteAsync(endpoint.ToString(), selected, 1);
-        if (await GetPreferredRouteInterfaceAsync(endpoint) != selected.InterfaceIndex) return false;
-
-        foreach (var backup in adapters.Where(x => x.Id != selected.Id && x.Gateway is not null))
-            await EnsureHostRouteAsync(endpoint.ToString(), backup, 500);
+        // Do the complete underlay switch in one PowerShell process. Starting a
+        // process for every route used to leave WireGuard waiting behind several
+        // hundred milliseconds of route maintenance after a cable disconnect.
+        // Install the selected route before demoting backups so an endpoint route
+        // exists throughout the switch and Windows emits an immediate route change
+        // notification to WireGuard's connected UDP socket.
+        var prefix = $"{endpoint}/32";
+        var commands = new List<string>
+        {
+            $"Set-NetIPInterface -InterfaceIndex {selected.InterfaceIndex} -AddressFamily IPv4 -AutomaticMetric Disabled -InterfaceMetric 5 -ErrorAction SilentlyContinue",
+            $"Remove-NetRoute -DestinationPrefix '{prefix}' -InterfaceIndex {selected.InterfaceIndex} -AddressFamily IPv4 -Confirm:$false -ErrorAction SilentlyContinue",
+            $"New-NetRoute -DestinationPrefix '{prefix}' -InterfaceIndex {selected.InterfaceIndex} -NextHop '{selected.Gateway}' -RouteMetric 1 -PolicyStore ActiveStore -ErrorAction Stop | Out-Null"
+        };
+        foreach (var backup in adapters.Where(x => x.Id != selected.Id && x.Gateway is not null && x.InterfaceIndex >= 0))
+        {
+            commands.Add($"Set-NetIPInterface -InterfaceIndex {backup.InterfaceIndex} -AddressFamily IPv4 -AutomaticMetric Disabled -InterfaceMetric 500 -ErrorAction SilentlyContinue");
+            commands.Add($"Remove-NetRoute -DestinationPrefix '{prefix}' -InterfaceIndex {backup.InterfaceIndex} -AddressFamily IPv4 -Confirm:$false -ErrorAction SilentlyContinue");
+            commands.Add($"New-NetRoute -DestinationPrefix '{prefix}' -InterfaceIndex {backup.InterfaceIndex} -NextHop '{backup.Gateway}' -RouteMetric 500 -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Out-Null");
+        }
+        await RunPowerShellAsync(string.Join("; ", commands));
         return await GetPreferredRouteInterfaceAsync(endpoint) == selected.InterfaceIndex;
     }
 

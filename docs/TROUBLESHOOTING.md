@@ -49,7 +49,7 @@ sudo ss -lunp | grep ':443 '
 
 Install 2.2.11 or later. The UI must say the replacement adapter is **verified** or list it under **Tunnel**. A green link-state icon alone is not proof of upstream Internet.
 
-If a physical adapter was unplugged while WireGuard remained active, use 2.2.13 or later. LinkWeaver recreates adapter-bound probe routes on every link-state transition and explicitly moves the WireGuard endpoint route back to the configured preferred adapter after recovery. Older builds could retain the NIC's address/gateway while Windows silently removed its host route, leaving that adapter Offline until WireGuard was deactivated.
+If a physical adapter was unplugged while WireGuard remained active, use 2.2.15 or later. LinkWeaver immediately moves the WireGuard endpoint route after its interface-bound backup probe succeeds, then performs slower verification. It also recreates adapter-bound probe routes on every link-state transition and explicitly moves the endpoint route back to the configured preferred adapter after recovery. Older builds could delay the endpoint move behind verification or retain the NIC's address/gateway while Windows silently removed its host route.
 
 Two real TCP attempts are bound to each adapter and run concurrently every 75 ms,
 with a 225 ms timeout.

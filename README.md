@@ -17,7 +17,9 @@ LinkWeaver is a free Windows 11 multipath tunnel that bonds Ethernet, Wi-Fi hots
 
 ## Connectivity forensics and stable paths — 2.2.11
 
-LinkWeaver 2.2.13 makes a manually selected preferred adapter authoritative in tunnel Failover mode for both uplink and relay downlink traffic. It recreates physical probe routes after a link down/up transition and forces WireGuard's endpoint route off the temporary backup when the preferred adapter recovers. The preferred label no longer moves to a temporary backup; the Role column distinguishes configured preference from current activity. Backup adapters still exchange small health/control probes, while Bonding mode intentionally uses every healthy path.
+LinkWeaver 2.2.15 moves the WireGuard endpoint route immediately after an interface-bound backup probe succeeds, before slower end-to-end verification. The complete endpoint migration now runs in one route operation, substantially reducing the traffic blackout when Ethernet disconnects or loses upstream Internet. Verification still runs after the move and the tunnel service remains active, preserving WireGuard state.
+
+The manually selected preferred adapter remains authoritative in tunnel Failover mode for both uplink and relay downlink traffic. LinkWeaver recreates physical probe routes after a link down/up transition and forces WireGuard's endpoint route off the temporary backup when the preferred adapter recovers. The preferred label does not move to a temporary backup; the Role column distinguishes configured preference from current activity. Backup adapters still exchange small health/control probes, while Bonding mode intentionally uses every healthy path.
 
 Selectable Aggressive, Fast, Balanced, and Stable response profiles control confirmation for Internet-only fluctuations while keeping physical disconnect response immediate. A WireGuard path is no longer reported as switched unless end-to-end tunnel Internet is verified; failed recovery attempts retain the last verified path and retry.
 

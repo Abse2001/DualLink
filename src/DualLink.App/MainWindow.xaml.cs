@@ -239,15 +239,28 @@ public partial class MainWindow : Window
             if (_serverSetupCancellation is null && _bonding is null && AutoCheck.IsChecked == true && routeNeedsApply)
             {
                 var requested = adapters.First(x => x.Id == decision.ActiveAdapterId);
+                // Move WireGuard before the slower physical and end-to-end checks.
+                // The decision already comes from an interface-bound successful
+                // probe, so delaying the endpoint migration only extends the packet
+                // blackout seen by games after Ethernet disappears.
+                var endpointMovedEarly = protonActive && _wireGuardEndpoint is not null &&
+                    await _network.MoveWireGuardEndpointRouteAsync(adapters, _wireGuardEndpoint, requested);
+                if (endpointMovedEarly)
+                {
+                    _endpointRouteSignature = null;
+                    AppLog.Write($"Immediately moved the WireGuard endpoint route to {requested.Name}; verifying in the background path.");
+                }
                 await _network.ApplyMetricsAsync(adapters, requested.Id, _settings.PreferredMetric, _settings.BackupMetric);
-                await EnsureEndpointRoutesAsync(adapters, requested.Id, force: true);
+                if (!endpointMovedEarly)
+                    await EnsureEndpointRoutesAsync(adapters, requested.Id, force: true);
                 if (await _network.VerifyAdapterInternetAsync(requested, adapters, _stop.Token))
                 {
                     decision = decision with { Reason = $"Switched to {requested.Name}; Internet path verified" };
                     var routeVerified = true;
                     if (protonActive)
                     {
-                        var wireGuard = await RecoverWireGuardAfterPathSwitchAsync(requested, adapters, decision.Reason);
+                        var wireGuard = await RecoverWireGuardAfterPathSwitchAsync(
+                            requested, adapters, decision.Reason, endpointMovedEarly);
                         routeVerified = wireGuard.Success;
                         decision = decision with { Reason = wireGuard.Reason };
                     }
@@ -401,7 +414,8 @@ public partial class MainWindow : Window
     }
 
     private async Task<(bool Success, string Reason)> RecoverWireGuardAfterPathSwitchAsync(
-        AdapterInfo adapter, IReadOnlyList<AdapterInfo> adapters, string successReason)
+        AdapterInfo adapter, IReadOnlyList<AdapterInfo> adapters, string successReason,
+        bool endpointAlreadyMoved = false)
     {
         // Never restart the WireGuard service during failover. Restarting destroys
         // the live tunnel and its flows, which can eject games from their sessions.
@@ -409,11 +423,13 @@ public partial class MainWindow : Window
         // and let the existing tunnel send its next handshake through the new NIC.
         if (_wireGuardEndpoint is null)
             return (false, $"{successReason}; WireGuard endpoint could not be verified");
-        if (!await _network.MoveWireGuardEndpointRouteAsync(adapters, _wireGuardEndpoint, adapter))
+        if (!endpointAlreadyMoved &&
+            !await _network.MoveWireGuardEndpointRouteAsync(adapters, _wireGuardEndpoint, adapter))
             return (false, $"{adapter.Name} recovered, but Windows did not move the WireGuard endpoint route to it");
         _endpointRouteSignature = null;
 
-        AppLog.Write($"Moved the WireGuard endpoint route to {adapter.Name} without restarting the tunnel.");
+        if (!endpointAlreadyMoved)
+            AppLog.Write($"Moved the WireGuard endpoint route to {adapter.Name} without restarting the tunnel.");
         for (var attempt = 1; attempt <= 3; attempt++)
         {
             await Task.Delay(150, _stop.Token);
