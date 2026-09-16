@@ -305,15 +305,6 @@ public sealed class NetworkService
         return await GetPreferredRouteInterfaceAsync(endpoint) == selected.InterfaceIndex;
     }
 
-    public async Task<bool> RestartActiveWireGuardTunnelServicesAsync()
-    {
-        const string command =
-            "$services = Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'WireGuardTunnel$*' -and $_.Status -eq 'Running' }; " +
-            "if ($services) { $services | Restart-Service -Force -ErrorAction Stop; 'restarted' }";
-        var result = await RunPowerShellAsync(command);
-        return result.Contains("restarted", StringComparison.OrdinalIgnoreCase);
-    }
-
     public async Task ApplyBondingEndpointRoutesAsync(IEnumerable<AdapterInfo> adapters, IPAddress endpoint)
     {
         foreach (var adapter in adapters.Where(x => x.Gateway is not null))

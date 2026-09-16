@@ -17,7 +17,7 @@ Windows route selection uses interface metrics. LinkWeaver also verifies a switc
 
 The **Response** dropdown controls Internet-only outage confirmation. **Aggressive** reacts to one failed probe and can switch during brief jitter; **Fast** fails over after one failure but requires two successful recovery rounds; **Balanced** (recommended) requires two failures and three recovery successes; **Stable** requires three failures and four recovery successes. A physical cable/link disconnection always fails over immediately regardless of this setting.
 
-LinkWeaver normally moves WireGuard between adapters without restarting it. If no verified backup remains and the official WireGuard tunnel service is stuck after an underlay change, LinkWeaver may restart that active tunnel service as an emergency recovery, rate-limited to once every 15 seconds. It does not do this while a verified backup is carrying the tunnel.
+LinkWeaver moves WireGuard between adapters without restarting it. A tunnel-service restart destroys live sessions, so LinkWeaver keeps the active service running even when post-switch Internet verification is delayed. The selected endpoint route remains on the healthy backup and is retried in place rather than being pointed back to a disconnected preferred adapter.
 
 ## Modes
 

@@ -25,6 +25,7 @@ public partial class MainWindow : Window
     private FailoverController _controller;
     private string? _selectedPreferenceId;
     private string? _lastAppliedId;
+    private string? _wireGuardRoutedId;
     private bool _updatingChoices;
     private System.Net.IPAddress? _wireGuardEndpoint;
     private string? _endpointRouteSignature;
@@ -55,7 +56,6 @@ public partial class MainWindow : Window
     private string _lastRecordedPublicIp = "";
     private DateTimeOffset _lastPublicIpProbe = DateTimeOffset.MinValue;
     private Task<string?>? _publicIpProbeTask;
-    private DateTimeOffset _lastWireGuardEmergencyRestart = DateTimeOffset.MinValue;
 
     public MainWindow()
     {
@@ -204,6 +204,9 @@ public partial class MainWindow : Window
                 _lastAppliedId = null;
                 _controller = new FailoverController(_settings);
             }
+            if (_wireGuardRoutedId is not null && !adapters.Any(x =>
+                    string.Equals(x.Id, _wireGuardRoutedId, StringComparison.OrdinalIgnoreCase)))
+                _wireGuardRoutedId = null;
             if (_bonding is not null)
             {
                 var livePaths = adapters.Where(IsUsablePhysicalPath)
@@ -214,7 +217,13 @@ public partial class MainWindow : Window
             _preferredBondingPathName = adapters.FirstOrDefault(adapter =>
                 string.Equals(adapter.Id, _selectedPreferenceId, StringComparison.OrdinalIgnoreCase))?.Name;
             var protonActive = ProtonModeCheck.IsChecked == true && _network.IsProtonTunnelActive();
-            var routePreference = _lastAppliedId ?? _selectedPreferenceId ?? adapters.FirstOrDefault(x => x.Type == System.Net.NetworkInformation.NetworkInterfaceType.Ethernet)?.Id;
+            // The endpoint may already have moved while end-to-end verification is
+            // still catching up. Preserve that real route choice across monitor
+            // rounds instead of recreating the dead adapter's preferred /32 route.
+            var routePreference = protonActive
+                ? _wireGuardRoutedId ?? _lastAppliedId ?? _selectedPreferenceId
+                : _lastAppliedId ?? _selectedPreferenceId;
+            routePreference ??= adapters.FirstOrDefault(x => x.Type == System.Net.NetworkInformation.NetworkInterfaceType.Ethernet)?.Id;
             if (_serverSetupCancellation is null)
                 await EnsureEndpointRoutesAsync(adapters, routePreference);
             var probeTargets = await _network.PrepareProbeRoutesAsync(adapters, protonActive);
@@ -247,6 +256,7 @@ public partial class MainWindow : Window
                     await _network.MoveWireGuardEndpointRouteAsync(adapters, _wireGuardEndpoint, requested);
                 if (endpointMovedEarly)
                 {
+                    _wireGuardRoutedId = requested.Id;
                     _endpointRouteSignature = null;
                     AppLog.Write($"Immediately moved the WireGuard endpoint route to {requested.Name}; verifying in the background path.");
                 }
@@ -276,7 +286,10 @@ public partial class MainWindow : Window
                         {
                             await _network.ApplyMetricsAsync(adapters, previous.Id, _settings.PreferredMetric, _settings.BackupMetric);
                             if (_wireGuardEndpoint is not null)
-                                await _network.MoveWireGuardEndpointRouteAsync(adapters, _wireGuardEndpoint, previous);
+                            {
+                                if (await _network.MoveWireGuardEndpointRouteAsync(adapters, _wireGuardEndpoint, previous))
+                                    _wireGuardRoutedId = previous.Id;
+                            }
                             _lastAppliedId = previous.Id;
                             confirmedActiveId = previous.Id;
                             decision = new(previous.Id, false,
@@ -284,26 +297,15 @@ public partial class MainWindow : Window
                         }
                         else
                         {
-                            var restartAllowed = protonActive &&
-                                DateTimeOffset.UtcNow - _lastWireGuardEmergencyRestart >= TimeSpan.FromSeconds(15);
-                            if (restartAllowed && await _network.RestartActiveWireGuardTunnelServicesAsync())
-                            {
-                                _lastWireGuardEmergencyRestart = DateTimeOffset.UtcNow;
-                                await Task.Delay(500, _stop.Token);
-                                if (await _network.VerifyRoutedInternetAsync(_stop.Token))
-                                {
-                                    _lastAppliedId = requested.Id;
-                                    confirmedActiveId = requested.Id;
-                                    decision = new(requested.Id, true,
-                                        $"Recovered {requested.Name}; restarted a stuck WireGuard tunnel because no verified backup remained");
-                                }
-                            }
                             if (confirmedActiveId is null)
                             {
                                 _lastAppliedId = null;
                                 decision = new(null, false,
-                                    $"{requested.Name} is online, but WireGuard recovery is still pending; retrying automatically");
+                                    $"{requested.Name} is carrying the WireGuard endpoint; tunnel verification is pending without restarting it");
                             }
+                            else
+                                decision = new(confirmedActiveId, false,
+                                    $"WireGuard endpoint moved to {requested.Name}; keeping the tunnel alive while verification catches up");
                         }
                     }
                 }
@@ -426,6 +428,7 @@ public partial class MainWindow : Window
         if (!endpointAlreadyMoved &&
             !await _network.MoveWireGuardEndpointRouteAsync(adapters, _wireGuardEndpoint, adapter))
             return (false, $"{adapter.Name} recovered, but Windows did not move the WireGuard endpoint route to it");
+        _wireGuardRoutedId = adapter.Id;
         _endpointRouteSignature = null;
 
         if (!endpointAlreadyMoved)
@@ -937,6 +940,7 @@ public partial class MainWindow : Window
         var signature = $"{_wireGuardEndpoint}|{preferredId}|{string.Join(',', adapters.Select(x => x.Id).Order())}";
         if (!force && signature == _endpointRouteSignature) return;
         await _network.ApplyWireGuardEndpointRoutesAsync(adapters, _wireGuardEndpoint, preferredId);
+        _wireGuardRoutedId = preferredId;
         _endpointRouteSignature = signature;
     }
     private async void Restore_Click(object sender, RoutedEventArgs e)
@@ -944,6 +948,7 @@ public partial class MainWindow : Window
         AutoCheck.IsChecked = false;
         await _network.RestoreManagedRoutesAsync(_network.GetInternetAdapters(), _wireGuardEndpoint);
         _endpointRouteSignature = null;
+        _wireGuardRoutedId = null;
         _controller = new FailoverController(_settings);
         StatusText.Text = "Windows automatic metrics restored";
     }

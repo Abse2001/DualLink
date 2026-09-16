@@ -184,11 +184,11 @@ jobs:
       - name: Verify release tag matches application version
         shell: bash
         run: |
-          test "${GITHUB_REF_NAME}" = "v2.2.15"
+          test "${GITHUB_REF_NAME}" = "v2.2.16"
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          name: "LinkWeaver 2.2.15 — Immediate WireGuard Failover"
+          name: "LinkWeaver 2.2.16 — Session-Preserving Failover"
           files: |
             artifacts/LinkWeaver-Setup-x64.exe
             artifacts/DualLink-Relay-linux-x64.zip

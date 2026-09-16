@@ -62,7 +62,7 @@ end-to-end route verification and immediate reclamation of that adapter.
 
 Export the history CSV after an interruption. `State` distinguishes a physically disconnected link from a link that remains up without IPv4, without a gateway, or without upstream Internet. The export also records active-path transitions, WireGuard/bonding state, public-IP changes, probe errors, throughput, latency, and recovery duration.
 
-LinkWeaver intentionally keeps the WireGuard service running during a path switch so active sessions are not torn down. If Proton remains offline after the endpoint route moves, deactivate/reactivate WireGuard manually after the affected session is already lost, then inspect `%LOCALAPPDATA%\DualLink\duallink.log`.
+LinkWeaver intentionally keeps the WireGuard service running during a path switch so active sessions are not torn down. Version 2.2.16 also preserves the newly selected endpoint route while tunnel verification catches up, preventing the next monitor round from pointing WireGuard back to dead Ethernet. If Proton remains offline after the endpoint route moves, deactivate/reactivate WireGuard manually after the affected session is already lost, then inspect `%LOCALAPPDATA%\DualLink\duallink.log`.
 
 ## Failover shows traffic on both adapters
 
