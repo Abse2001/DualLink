@@ -51,6 +51,8 @@ Install 2.2.11 or later. The UI must say the replacement adapter is **verified**
 
 If a physical adapter was unplugged while WireGuard remained active, use 2.2.15 or later. LinkWeaver immediately moves the WireGuard endpoint route after its interface-bound backup probe succeeds, then performs slower verification. It also recreates adapter-bound probe routes on every link-state transition and explicitly moves the endpoint route back to the configured preferred adapter after recovery. Older builds could delay the endpoint move behind verification or retain the NIC's address/gateway while Windows silently removed its host route.
 
+If Ethernet remains listed as Offline after its upstream Internet returns, use 2.2.17 or later. An upstream-only outage can leave the Windows link, address, and gateway unchanged, so older versions did not rebuild the Ethernet-specific probe route. LinkWeaver now repairs that route at a rate-limited cadence and immediately re-probes Ethernet without stopping WireGuard.
+
 Two real TCP attempts are bound to each adapter and run concurrently every 75 ms,
 with a 225 ms timeout.
 If both fail, LinkWeaver immediately classifies that adapter as `Link up — Internet

@@ -227,9 +227,32 @@ public partial class MainWindow : Window
             if (_serverSetupCancellation is null)
                 await EnsureEndpointRoutesAsync(adapters, routePreference);
             var probeTargets = await _network.PrepareProbeRoutesAsync(adapters, protonActive);
-            var rawProbes = await Task.WhenAll(adapters.Select(x => _network.ProbeAsync(
+            var firstProbes = await Task.WhenAll(adapters.Select(x => _network.ProbeAsync(
                 x, _settings.ProbeHost, protonActive, _stop.Token,
                 probeTargets.TryGetValue(x.Id, out var target) ? target : null)));
+            var rawProbes = await Task.WhenAll(firstProbes.Select(async probe =>
+            {
+                var adapter = adapters.First(x => x.Id == probe.AdapterId);
+                if (probe.Online)
+                {
+                    _network.MarkProbeRouteHealthy(adapter.Id);
+                    return probe;
+                }
+
+                if (!protonActive || !probeTargets.TryGetValue(adapter.Id, out var target) ||
+                    !await _network.RepairProbeRouteAsync(adapter, target))
+                    return probe;
+
+                AppLog.Write($"Recreated the stale physical probe route for {adapter.Name}; checking recovery immediately.");
+                var repaired = await _network.ProbeAsync(
+                    adapter, _settings.ProbeHost, protonActive, _stop.Token, target);
+                if (repaired.Online)
+                {
+                    _network.MarkProbeRouteHealthy(adapter.Id);
+                    AppLog.Write($"{adapter.Name} recovered after its WireGuard bypass route was recreated.");
+                }
+                return repaired;
+            }));
             var response = SelectedResponseProfile();
             var probes = rawProbes.Select(probe =>
             {

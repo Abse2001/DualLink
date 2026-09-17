@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http;
 using System.Net.NetworkInformation;
@@ -15,6 +16,7 @@ public sealed class NetworkService
     private const string VerificationTarget = "1.0.0.1";
     private readonly Dictionary<string, string> _probeTargetAssignments = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _observedPhysicalAdapters = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _lastProbeRouteRepair = new(StringComparer.OrdinalIgnoreCase);
     private string? _probeRouteSignature;
 
     public IReadOnlyDictionary<string, AdapterByteCounters> GetAdapterByteCounters()
@@ -116,6 +118,30 @@ public sealed class NetworkService
         _probeRouteSignature = signature;
         return assignments;
     }
+
+    public async Task<bool> RepairProbeRouteAsync(AdapterInfo adapter, string target)
+    {
+        if (adapter.Status != OperationalStatus.Up || adapter.Address is null || adapter.Gateway is null)
+            return false;
+
+        // An upstream-only outage does not change the NIC's Windows status,
+        // address, interface index, or gateway. The normal route fingerprint then
+        // remains unchanged even if Windows kept a stale adapter-bound host route.
+        // Recreate that one route at a bounded cadence and immediately re-probe so
+        // a preferred Ethernet path can rejoin while WireGuard remains active.
+        var now = DateTimeOffset.UtcNow;
+        if (_lastProbeRouteRepair.TryGetValue(adapter.Id, out var lastRepair) &&
+            now - lastRepair < TimeSpan.FromSeconds(1))
+            return false;
+
+        _lastProbeRouteRepair[adapter.Id] = now;
+        await EnsureHostRouteAsync(target, adapter, 5);
+        _probeRouteSignature = null;
+        return true;
+    }
+
+    public void MarkProbeRouteHealthy(string adapterId) =>
+        _lastProbeRouteRepair.TryRemove(adapterId, out _);
 
     public async Task<ProbeResult> ProbeAsync(AdapterInfo adapter, string host, bool tunnelActive,
         CancellationToken token, string? assignedTarget = null)
