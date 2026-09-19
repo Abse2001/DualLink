@@ -56,6 +56,7 @@ public partial class MainWindow : Window
     private string _lastRecordedPublicIp = "";
     private DateTimeOffset _lastPublicIpProbe = DateTimeOffset.MinValue;
     private Task<string?>? _publicIpProbeTask;
+    private DateTimeOffset _lastWireGuardRouteAudit = DateTimeOffset.MinValue;
 
     public MainWindow()
     {
@@ -227,37 +228,21 @@ public partial class MainWindow : Window
             if (_serverSetupCancellation is null)
                 await EnsureEndpointRoutesAsync(adapters, routePreference);
             var probeTargets = await _network.PrepareProbeRoutesAsync(adapters, protonActive);
-            var firstProbes = await Task.WhenAll(adapters.Select(x => _network.ProbeAsync(
-                x, _settings.ProbeHost, protonActive, _stop.Token,
-                probeTargets.TryGetValue(x.Id, out var target) ? target : null)));
-            var rawProbes = await Task.WhenAll(firstProbes.Select(async probe =>
-            {
-                var adapter = adapters.First(x => x.Id == probe.AdapterId);
-                if (probe.Online)
-                {
-                    _network.MarkProbeRouteHealthy(adapter.Id);
-                    return probe;
-                }
-
-                if (!protonActive || !probeTargets.TryGetValue(adapter.Id, out var target) ||
-                    !await _network.RepairProbeRouteAsync(adapter, target))
-                    return probe;
-
-                AppLog.Write($"Recreated the stale physical probe route for {adapter.Name}; checking recovery immediately.");
-                var repaired = await _network.ProbeAsync(
-                    adapter, _settings.ProbeHost, protonActive, _stop.Token, target);
-                if (repaired.Online)
-                {
-                    _network.MarkProbeRouteHealthy(adapter.Id);
-                    AppLog.Write($"{adapter.Name} recovered after its WireGuard bypass route was recreated.");
-                }
-                return repaired;
-            }));
             var response = SelectedResponseProfile();
+            var rawProbes = await Task.WhenAll(adapters.Select(x => _network.ProbeAsync(
+                x, _settings.ProbeHost, protonActive, _stop.Token,
+                probeTargets.TryGetValue(x.Id, out var target) ? target : null,
+                SelectedProbeTimeoutMilliseconds())));
             var probes = rawProbes.Select(probe =>
             {
                 var adapter = adapters.First(x => x.Id == probe.AdapterId);
-                return _healthTracker.Update(probe, response.Failures, response.Recoveries,
+                if (probe.Online) _network.MarkProbeRouteHealthy(adapter.Id);
+                // Never debounce failure of the path actually carrying WireGuard.
+                // Stability profiles apply to standby paths and recovery, not to a
+                // live traffic black hole.
+                var failures = string.Equals(adapter.Id, _wireGuardRoutedId ?? _lastAppliedId,
+                    StringComparison.OrdinalIgnoreCase) ? 1 : response.Failures;
+                return _healthTracker.Update(probe, failures, response.Recoveries,
                     adapter.Status == OperationalStatus.Up);
             }).ToArray();
             var decision = ChooseConnection(probes);
@@ -362,6 +347,21 @@ public partial class MainWindow : Window
                     if (confirmedActiveId is null)
                         decision = new(null, false, "Route switch failed end-to-end verification; no connection is marked active");
                 }
+            }
+
+            // Recovery maintenance must never delay an active-path failover. Only
+            // after traffic has moved do we repair stale standby probe routes and
+            // audit the endpoint route Windows is actually using.
+            if (_bonding is null && protonActive)
+            {
+                foreach (var probe in rawProbes.Where(x => !x.Online))
+                {
+                    var adapter = adapters.First(x => x.Id == probe.AdapterId);
+                    if (probeTargets.TryGetValue(adapter.Id, out var target) &&
+                        await _network.RepairProbeRouteAsync(adapter, target))
+                        AppLog.Write($"Recreated the stale standby probe route for {adapter.Name}; it will be rechecked next round.");
+                }
+                await AuditWireGuardEndpointRouteAsync(adapters);
             }
 
             _rows.Clear();
@@ -924,6 +924,36 @@ public partial class MainWindow : Window
             "Stable" => (3, 4),
             _ => (2, 3)
         };
+
+    private int SelectedProbeTimeoutMilliseconds() =>
+        (ResponseProfileCombo?.SelectedItem as ComboBoxItem)?.Tag?.ToString() switch
+        {
+            "Aggressive" => 125,
+            "Fast" => 175,
+            "Stable" => 300,
+            _ => 225
+        };
+
+    private async Task AuditWireGuardEndpointRouteAsync(IReadOnlyList<AdapterInfo> adapters)
+    {
+        if (_wireGuardEndpoint is null || _wireGuardRoutedId is null ||
+            DateTimeOffset.UtcNow - _lastWireGuardRouteAudit < TimeSpan.FromSeconds(2))
+            return;
+
+        _lastWireGuardRouteAudit = DateTimeOffset.UtcNow;
+        var expected = adapters.FirstOrDefault(x => string.Equals(
+            x.Id, _wireGuardRoutedId, StringComparison.OrdinalIgnoreCase));
+        if (expected is null || expected.Gateway is null) return;
+        if (await _network.GetPreferredRouteInterfaceAsync(_wireGuardEndpoint) == expected.InterfaceIndex)
+            return;
+
+        AppLog.Write($"WireGuard endpoint route drift detected; restoring {expected.Name} without restarting the tunnel.");
+        if (await _network.MoveWireGuardEndpointRouteAsync(adapters, _wireGuardEndpoint, expected))
+        {
+            await _network.ApplyMetricsAsync(adapters, expected.Id, _settings.PreferredMetric, _settings.BackupMetric);
+            _endpointRouteSignature = null;
+        }
+    }
 
     private void ResponseProfile_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {

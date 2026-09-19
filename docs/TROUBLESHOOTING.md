@@ -53,6 +53,8 @@ If a physical adapter was unplugged while WireGuard remained active, use 2.2.15 
 
 If Ethernet remains listed as Offline after its upstream Internet returns, use 2.2.17 or later. An upstream-only outage can leave the Windows link, address, and gateway unchanged, so older versions did not rebuild the Ethernet-specific probe route. LinkWeaver now repairs that route at a rate-limited cadence and immediately re-probes Ethernet without stopping WireGuard.
 
+Version 2.2.18 performs failover before standby-route repair. In Aggressive mode the active path uses a 125 ms probe deadline and one failed round; other response profiles no longer delay removal of the path carrying WireGuard. LinkWeaver also audits the winning endpoint route every two seconds and repairs route drift without restarting the tunnel. Use **Prepare Proton config** again and import the newly generated configuration to enable the two-second persistent keepalive.
+
 Two real TCP attempts are bound to each adapter and run concurrently every 75 ms,
 with a 225 ms timeout.
 If both fail, LinkWeaver immediately classifies that adapter as `Link up — Internet

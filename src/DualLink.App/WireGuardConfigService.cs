@@ -34,6 +34,10 @@ public sealed class WireGuardConfigService
             throw new InvalidOperationException("The selected file has no AllowedIPs entry.");
 
         prepared = Regex.Replace(prepared, @"(?mi)^\s*Endpoint\s*=.*$", $"Endpoint = {endpoint}:{port}");
+        if (Regex.IsMatch(prepared, @"(?mi)^\s*PersistentKeepalive\s*="))
+            prepared = Regex.Replace(prepared, @"(?mi)^\s*PersistentKeepalive\s*=.*$", "PersistentKeepalive = 2");
+        else
+            prepared = Regex.Replace(prepared, @"(?mi)^(\s*Endpoint\s*=.*)$", "$1\r\nPersistentKeepalive = 2");
 
         var directory = Path.GetDirectoryName(sourcePath) ?? Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
         var outputPath = Path.Combine(directory, $"{Path.GetFileNameWithoutExtension(sourcePath)}-DualLink.conf");

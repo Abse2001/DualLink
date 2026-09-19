@@ -144,7 +144,7 @@ public sealed class NetworkService
         _lastProbeRouteRepair.TryRemove(adapterId, out _);
 
     public async Task<ProbeResult> ProbeAsync(AdapterInfo adapter, string host, bool tunnelActive,
-        CancellationToken token, string? assignedTarget = null)
+        CancellationToken token, string? assignedTarget = null, int timeoutMilliseconds = 225)
     {
         // A prepared WireGuard config uses /1 routes instead of the Windows /0 kill
         // switch. A single public ICMP target is pinned to each physical adapter so
@@ -179,7 +179,7 @@ public sealed class NetworkService
                     IPAddress.HostToNetworkOrder(adapter.InterfaceIndex));
                 socket.Bind(new IPEndPoint(adapter.Address!, 0));
                 using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
-                deadline.CancelAfter(TimeSpan.FromMilliseconds(225));
+                deadline.CancelAfter(TimeSpan.FromMilliseconds(Math.Clamp(timeoutMilliseconds, 75, 1000)));
                 var stopwatch = Stopwatch.StartNew();
                 await socket.ConnectAsync(new IPEndPoint(IPAddress.Parse(target), 443), deadline.Token);
                 stopwatch.Stop();

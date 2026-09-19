@@ -17,7 +17,7 @@ LinkWeaver is a free Windows 11 multipath tunnel that bonds Ethernet, Wi-Fi hots
 
 ## Connectivity forensics and stable paths — 2.2.11
 
-LinkWeaver 2.2.17 automatically repairs and re-probes an adapter-specific health route when Ethernet stays physically connected, loses upstream Internet, and later recovers without any Windows link-state or gateway change. This lets preferred Ethernet rejoin underneath the active WireGuard tunnel without deactivating it. The 2.2.16 session-preserving behavior remains: the active WireGuard service, VPN server, and public IP stay unchanged throughout failover and failback.
+LinkWeaver 2.2.18 makes active-path failover higher priority than all recovery maintenance. A failed Ethernet path is removed after its first failed round, using a 125 ms probe deadline in Aggressive mode; WireGuard moves to an already healthy Wi-Fi path before LinkWeaver repairs or retests Ethernet. Standby-route repair happens afterward, and a periodic endpoint audit self-heals Windows route drift without restarting WireGuard. Newly prepared configurations use a two-second persistent keepalive to keep roaming and NAT state fresh. The VPN server and public IP remain unchanged.
 
 The manually selected preferred adapter remains authoritative in tunnel Failover mode for both uplink and relay downlink traffic. LinkWeaver recreates physical probe routes after a link down/up transition and forces WireGuard's endpoint route off the temporary backup when the preferred adapter recovers. The preferred label does not move to a temporary backup; the Role column distinguishes configured preference from current activity. Backup adapters still exchange small health/control probes, while Bonding mode intentionally uses every healthy path.
 
