@@ -12,8 +12,14 @@ namespace DualLink.App;
 public sealed class NetworkService
 {
     private static readonly HttpClient PublicIpClient = new() { Timeout = TimeSpan.FromSeconds(2) };
-    private static readonly string[] ProbeTargets = ["1.1.1.1", "8.8.8.8", "8.8.4.4", "9.9.9.9"];
+    // Physical-path probes must never share a destination with the routed tunnel
+    // verification. A /32 probe route intentionally bypasses WireGuard; reusing
+    // that address for tunnel verification made a dead Ethernet route look like a
+    // failed WireGuard handoff and caused the endpoint route to be rebuilt forever.
+    private static readonly string[] ProbeTargets = ["8.8.8.8", "8.8.4.4", "9.9.9.9", "149.112.112.112"];
+    private static readonly string[] LegacyProbeTargets = ["1.1.1.1"];
     private const string VerificationTarget = "1.0.0.1";
+    private const string TunnelVerificationTarget = "1.1.1.1";
     private readonly Dictionary<string, string> _probeTargetAssignments = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _observedPhysicalAdapters = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, DateTimeOffset> _lastProbeRouteRepair = new(StringComparer.OrdinalIgnoreCase);
@@ -113,6 +119,12 @@ public sealed class NetworkService
         // Route preparation is deliberately serialized. The old implementation
         // changed host routes inside concurrent probes, allowing two adapters to
         // race for the same destination and making healthy paths flicker offline.
+        // Also remove the v2.2.18 physical /32 for 1.1.1.1. ActiveStore routes can
+        // survive an application upgrade and would keep hijacking the new tunnel
+        // verification until Windows restarts.
+        foreach (var adapter in adapters.Where(x => x.InterfaceIndex >= 0))
+            foreach (var target in LegacyProbeTargets)
+                await RunPowerShellAsync($"Remove-NetRoute -DestinationPrefix '{target}/32' -InterfaceIndex {adapter.InterfaceIndex} -AddressFamily IPv4 -Confirm:$false -ErrorAction SilentlyContinue");
         foreach (var adapter in adapters.Where(x => x.Gateway is not null))
             await EnsureHostRouteAsync(assignments[adapter.Id], adapter, 5);
         _probeRouteSignature = signature;
@@ -227,7 +239,7 @@ public sealed class NetworkService
             using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
             deadline.CancelAfter(TimeSpan.FromMilliseconds(900));
-            await socket.ConnectAsync(new IPEndPoint(IPAddress.Parse("1.1.1.1"), 443), deadline.Token);
+            await socket.ConnectAsync(new IPEndPoint(IPAddress.Parse(TunnelVerificationTarget), 443), deadline.Token);
             return socket.Connected;
         }
         catch (Exception error) when (error is SocketException or OperationCanceledException)
@@ -373,7 +385,7 @@ public sealed class NetworkService
 
     public async Task RestoreManagedRoutesAsync(IEnumerable<AdapterInfo> adapters, IPAddress? endpoint)
     {
-        var prefixes = ProbeTargets.Append(VerificationTarget).Select(x => $"'{x}/32'").ToList();
+        var prefixes = ProbeTargets.Concat(LegacyProbeTargets).Append(VerificationTarget).Select(x => $"'{x}/32'").ToList();
         if (endpoint is not null) prefixes.Add($"'{endpoint}/32'");
         foreach (var adapter in adapters)
             await RunPowerShellAsync($"Remove-NetRoute -DestinationPrefix @({string.Join(',', prefixes)}) -InterfaceIndex {adapter.InterfaceIndex} -AddressFamily IPv4 -Confirm:$false -ErrorAction SilentlyContinue");

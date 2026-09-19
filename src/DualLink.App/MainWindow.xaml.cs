@@ -260,13 +260,21 @@ public partial class MainWindow : Window
                 // The decision already comes from an interface-bound successful
                 // probe, so delaying the endpoint migration only extends the packet
                 // blackout seen by games after Ethernet disappears.
-                var endpointMovedEarly = protonActive && _wireGuardEndpoint is not null &&
-                    await _network.MoveWireGuardEndpointRouteAsync(adapters, _wireGuardEndpoint, requested);
+                // Once the endpoint is already on the requested adapter, leave its
+                // /32 route untouched while tunnel verification catches up. Rebuilding
+                // it every monitor round can continuously reset Windows' UDP route
+                // cache and prevent WireGuard from completing its roaming handshake.
+                var endpointAlreadyOnRequested = protonActive && string.Equals(
+                    _wireGuardRoutedId, requested.Id, StringComparison.OrdinalIgnoreCase);
+                var endpointMovedEarly = endpointAlreadyOnRequested ||
+                    (protonActive && _wireGuardEndpoint is not null &&
+                     await _network.MoveWireGuardEndpointRouteAsync(adapters, _wireGuardEndpoint, requested));
                 if (endpointMovedEarly)
                 {
                     _wireGuardRoutedId = requested.Id;
                     _endpointRouteSignature = null;
-                    AppLog.Write($"Immediately moved the WireGuard endpoint route to {requested.Name}; verifying in the background path.");
+                    if (!endpointAlreadyOnRequested)
+                        AppLog.Write($"Immediately moved the WireGuard endpoint route to {requested.Name}; verifying in the background path.");
                 }
                 await _network.ApplyMetricsAsync(adapters, requested.Id, _settings.PreferredMetric, _settings.BackupMetric);
                 if (!endpointMovedEarly)
@@ -373,15 +381,20 @@ public partial class MainWindow : Window
                 _bondedInternetLatency = await _network.MeasureBondedInternetLatencyAsync(_stop.Token);
                 _lastTunnelLatencyProbe = DateTimeOffset.UtcNow;
             }
+            // Report the path that is actually carrying the WireGuard endpoint.
+            // _lastAppliedId deliberately remains the last end-to-end verified path,
+            // so using it for the UI marked disconnected Ethernet as active while
+            // Wi-Fi was already routed and awaiting a fresh handshake.
+            var routedActiveId = protonActive ? _wireGuardRoutedId ?? confirmedActiveId : confirmedActiveId;
             foreach (var adapter in adapters)
             {
                 var probe = probes.First(x => x.AdapterId == adapter.Id);
                 traffic.TryGetValue(adapter.Id, out var pathTraffic);
                 relayTelemetry.TryGetValue(adapter.Name, out var relaySample);
                 var configuredPreferred = _selectedPreferenceId is null
-                    ? string.Equals((_bonding is null ? confirmedActiveId : decision.ActiveAdapterId), adapter.Id, StringComparison.OrdinalIgnoreCase)
+                    ? string.Equals((_bonding is null ? routedActiveId : decision.ActiveAdapterId), adapter.Id, StringComparison.OrdinalIgnoreCase)
                     : string.Equals(_selectedPreferenceId, adapter.Id, StringComparison.OrdinalIgnoreCase);
-                var active = string.Equals((_bonding is null ? confirmedActiveId : decision.ActiveAdapterId), adapter.Id,
+                var active = string.Equals((_bonding is null ? routedActiveId : decision.ActiveAdapterId), adapter.Id,
                     StringComparison.OrdinalIgnoreCase);
                 _rows.Add(AdapterRow.From(adapter, probe, configuredPreferred, active,
                     pathTraffic?.Upload ?? "—", pathTraffic?.Download ?? "—",
@@ -402,7 +415,7 @@ public partial class MainWindow : Window
             }).ToArray();
             UpdateRelayLatencyStatus(relayTelemetry.Values);
             UpdatePublicIpObservation();
-            RecordConnectionHistory(adapters, probes, traffic, confirmedActiveId, protonActive);
+            RecordConnectionHistory(adapters, probes, traffic, routedActiveId, protonActive);
             if (_bonding is not null)
             {
                 var verifiedPaths = relayTelemetry.Values.Where(x => x.Online).Select(x => x.PathId).ToArray();
@@ -410,7 +423,14 @@ public partial class MainWindow : Window
             }
             else
             {
-                ActiveText.Text = confirmedActiveId is null ? "Active: Unverified" : $"Active: {adapters.FirstOrDefault(x => x.Id == confirmedActiveId)?.Name} · verified";
+                if (routedActiveId is null)
+                    ActiveText.Text = "Active: Unverified";
+                else
+                {
+                    var routedName = adapters.FirstOrDefault(x => x.Id == routedActiveId)?.Name;
+                    var verified = string.Equals(routedActiveId, _lastAppliedId, StringComparison.OrdinalIgnoreCase);
+                    ActiveText.Text = $"Active: {routedName} · {(verified ? "verified" : "routed, verifying")}";
+                }
             }
             StatusText.Text = decision.Reason;
             VpnText.Text = ProtonModeCheck.IsChecked == true
