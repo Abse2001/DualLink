@@ -69,6 +69,9 @@ public partial class MainWindow : Window
     private bool _preferenceInitialized;
     private Task<IPAddress?>? _endpointObservation;
     private DateTimeOffset _lastEndpointObservation;
+    private readonly TunnelRecoveryPolicy _tunnelRecovery = new();
+    private readonly PathProbeScheduler _probeScheduler = new();
+    private readonly Dictionary<string, ProbeResult> _stableProbes = new(StringComparer.OrdinalIgnoreCase);
 
     public MainWindow()
     {
@@ -233,12 +236,22 @@ public partial class MainWindow : Window
             _probeRound = round;
             var adapters = _network.GetInternetAdapters();
             var identities = adapters.ToDictionary(x => x.Id, AdapterIdentity, StringComparer.OrdinalIgnoreCase);
+            foreach (var removed in _adapterIdentities.Keys.Where(id => !identities.ContainsKey(id)).ToArray())
+            {
+                _healthTracker.Forget(removed);
+                _tunnelRecovery.Forget(removed);
+                _latestGoodProbes.Remove(removed);
+                _stableProbes.Remove(removed);
+                _adapterIdentities.Remove(removed);
+            }
             foreach (var adapter in adapters)
             {
                 if (_adapterIdentities.TryGetValue(adapter.Id, out var oldIdentity) && oldIdentity != identities[adapter.Id])
                 {
                     _healthTracker.Forget(adapter.Id);
+                    _tunnelRecovery.Forget(adapter.Id);
                     _latestGoodProbes.Remove(adapter.Id);
+                    _stableProbes.Remove(adapter.Id);
                     if (adapter.Id == _lastAppliedId) _lastAppliedId = null;
                 }
                 _adapterIdentities[adapter.Id] = identities[adapter.Id];
@@ -272,20 +285,22 @@ public partial class MainWindow : Window
             var carryingId = protonActive ? _wireGuardRoutedId : _lastAppliedId;
             if (manage && carryingId is not null && !adapters.Any(x => x.Id == carryingId && NetworkService.IsUsable(x)))
             {
-                var standby = RecentStandby(adapters, carryingId);
+                var standby = RecentStandby(adapters, carryingId, allowRejected: true);
                 if (standby is not null) await SwitchPathAsync(standby, adapters, protonActive);
             }
 
             await _network.PrepareProbeRoutesAsync(adapters, protonActive);
             var response = SelectedResponseProfile();
-            var tasks = adapters.ToDictionary(x => x.Id, x => _network.ProbeAsync(
-                x, _settings.ProbeHost, protonActive, round.Token, timeoutMilliseconds: SelectedProbeTimeoutMilliseconds()));
+            var completedProbes = _probeScheduler.Collect(identities).ToList();
+            var probeTimeout = SelectedProbeTimeoutMilliseconds();
+            var tasks = adapters.ToDictionary(x => x.Id, x => _probeScheduler.Start(x.Id, identities[x.Id], token =>
+                _network.ProbeAsync(x, _settings.ProbeHost, protonActive, token, timeoutMilliseconds: probeTimeout), _stop.Token));
             carryingId = protonActive ? _wireGuardRoutedId : _lastAppliedId;
             // Check the carrying path first. A slow or broken standby must never
             // delay escape from the path carrying the game.
             if (manage && carryingId is not null && tasks.TryGetValue(carryingId, out var carryingTask))
             {
-                var sample = await carryingTask;
+                var sample = await carryingTask.WaitAsync(round.Token);
                 if (!sample.Online)
                 {
                     failedCarryingPaths.Add(carryingId);
@@ -294,11 +309,23 @@ public partial class MainWindow : Window
                     var standby = adapters.Where(x => x.Id != carryingId && NetworkService.IsUsable(x))
                         .Where(x => tasks[x.Id].IsCompletedSuccessfully && tasks[x.Id].Result.Online)
                         .OrderByDescending(x => tasks[x.Id].Result.Score).FirstOrDefault()
-                        ?? RecentStandby(adapters, carryingId);
+                        ?? RecentStandby(adapters, carryingId, allowRejected: true);
                     if (standby is not null) await SwitchPathAsync(standby, adapters, protonActive);
                 }
             }
-            var rawProbes = await Task.WhenAll(tasks.Values);
+            else if (manage && carryingId is null && tasks.Count > 0)
+            {
+                var pending = tasks.Values.ToList();
+                while (pending.Count > 0)
+                {
+                    var done = await Task.WhenAny(pending).WaitAsync(round.Token);
+                    pending.Remove(done);
+                    if ((await done).Online) break;
+                }
+            }
+            completedProbes.AddRange(_probeScheduler.Collect(identities));
+            var rawProbes = completedProbes.GroupBy(x => x.AdapterId, StringComparer.OrdinalIgnoreCase)
+                .Select(group => group.OrderByDescending(x => x.Timestamp).First()).ToArray();
             round.Token.ThrowIfCancellationRequested();
             // Reject results from a topology that changed while its sockets ran.
             var current = _network.GetInternetAdapters();
@@ -307,17 +334,22 @@ public partial class MainWindow : Window
                 WakeNetworkMonitor();
                 return;
             }
-            var probes = rawProbes.Select(probe =>
+            foreach (var probe in rawProbes)
             {
                 var adapter = adapters.First(x => x.Id == probe.AdapterId);
                 if (probe.Online) _latestGoodProbes[probe.AdapterId] = probe;
                 else _latestGoodProbes.Remove(probe.AdapterId);
                 var failures = failedCarryingPaths.Contains(adapter.Id) || string.Equals(adapter.Id,
                     protonActive ? _wireGuardRoutedId : _lastAppliedId, StringComparison.OrdinalIgnoreCase) ? 1 : response.Failures;
-                return _healthTracker.Update(probe, failures, response.Recoveries, NetworkService.IsUsable(adapter), TimeSpan.FromSeconds(1));
-            }).ToArray();
+                _stableProbes[probe.AdapterId] = _healthTracker.Update(probe, failures, response.Recoveries,
+                    NetworkService.IsUsable(adapter), TimeSpan.FromSeconds(1));
+            }
+            var probes = adapters.Select(adapter => _stableProbes.TryGetValue(adapter.Id, out var sample) ? sample :
+                new ProbeResult(adapter.Id, DateTimeOffset.UtcNow, false, 0, 0, 100, 0,
+                    NetworkService.IsUsable(adapter) ? "Checking Internet reachability" : "Physical link unavailable")).ToArray();
             _controller.Synchronize(protonActive ? _wireGuardRoutedId : _lastAppliedId);
-            var decision = ChooseConnection(probes);
+            var decision = ChooseConnection(protonActive ? probes.Where(x =>
+                _tunnelRecovery.IsEligible(x.AdapterId, DateTimeOffset.UtcNow)).ToArray() : probes);
             if (manage && decision.ActiveAdapterId is not null)
             {
                 var requested = adapters.First(x => x.Id == decision.ActiveAdapterId);
@@ -331,7 +363,7 @@ public partial class MainWindow : Window
             if (manage && protonActive)
             {
                 await AuditWireGuardEndpointRouteAsync(adapters);
-                PollTunnelVerification(adapters);
+                await PollTunnelVerificationAsync(adapters);
                 if (_wireGuardRoutedId is not null && _lastAppliedId != _wireGuardRoutedId)
                     decision = decision with { Reason = $"WireGuard routed to {adapters.FirstOrDefault(x => x.Id == _wireGuardRoutedId)?.Name}; tunnel verification pending" };
             }
@@ -475,8 +507,9 @@ public partial class MainWindow : Window
         }
     }
 
-    private AdapterInfo? RecentStandby(IReadOnlyList<AdapterInfo> adapters, string excluded) =>
+    private AdapterInfo? RecentStandby(IReadOnlyList<AdapterInfo> adapters, string excluded, bool allowRejected = false) =>
         adapters.Where(x => x.Id != excluded && NetworkService.IsUsable(x))
+            .Where(x => allowRejected || _tunnelRecovery.IsEligible(x.Id, DateTimeOffset.UtcNow))
             .Where(x => _latestGoodProbes.TryGetValue(x.Id, out var probe) &&
                 DateTimeOffset.UtcNow - probe.Timestamp.ToUniversalTime() < TimeSpan.FromSeconds(1))
             .OrderByDescending(x => _latestGoodProbes[x.Id].Score).FirstOrDefault();
@@ -516,17 +549,29 @@ public partial class MainWindow : Window
         _tunnelVerificationIdentity = null;
     }
 
-    private void PollTunnelVerification(IReadOnlyList<AdapterInfo> adapters)
+    private async Task PollTunnelVerificationAsync(IReadOnlyList<AdapterInfo> adapters)
     {
         var routed = adapters.FirstOrDefault(x => x.Id == _wireGuardRoutedId && NetworkService.IsUsable(x));
         if (routed is null) { CancelTunnelVerification(); _lastAppliedId = null; return; }
         var identity = $"{_wireGuardEndpoint}|{AdapterIdentity(routed)}";
         if (_tunnelVerification is { IsCompleted: true } completed)
         {
-            if (completed.IsCompletedSuccessfully && completed.Result && _tunnelVerificationIdentity == identity)
-                _lastAppliedId = _latestGoodProbes.ContainsKey(routed.Id) ? routed.Id : null;
-            else if (_tunnelVerificationIdentity == identity)
-                _lastAppliedId = null;
+            if (_tunnelVerificationIdentity == identity)
+            {
+                var verified = completed.IsCompletedSuccessfully && completed.Result;
+                _lastAppliedId = verified && _latestGoodProbes.ContainsKey(routed.Id) ? routed.Id : null;
+                if (_tunnelRecovery.Observe(routed.Id, identity, verified))
+                {
+                    var standby = RecentStandby(adapters, routed.Id);
+                    if (standby is not null)
+                    {
+                        _tunnelRecovery.Reject(routed.Id, DateTimeOffset.UtcNow);
+                        AppLog.Write($"WireGuard failed two independent tunnel verification rounds on {routed.Name}; trying {standby.Name} with a 15-second retry cooldown.");
+                        await SwitchPathAsync(standby, adapters, wireGuard: true);
+                        return;
+                    }
+                }
+            }
             CancelTunnelVerification();
         }
         if (_tunnelVerification is not null || DateTimeOffset.UtcNow - _lastTunnelVerification < TimeSpan.FromMilliseconds(500)) return;
@@ -1101,6 +1146,7 @@ public partial class MainWindow : Window
         NetworkChange.NetworkAddressChanged -= NetworkChanged;
         NetworkChange.NetworkAvailabilityChanged -= NetworkAvailabilityChanged;
         _stop.Cancel();
+        _probeScheduler.Dispose();
         SaveMonitorSettings();
         CancelTunnelVerification();
         ConnectionHistoryStore.Save(new(_historySamples, _historyEvents));

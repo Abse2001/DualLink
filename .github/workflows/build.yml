@@ -180,7 +180,7 @@ jobs:
           path: relay-package/
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || (github.ref == 'refs/heads/main' && github.event.head_commit.message == 'Release LinkWeaver 2.3.0')
     needs: [build, relay]
     runs-on: ubuntu-latest
     permissions:
@@ -193,11 +193,28 @@ jobs:
       - name: Verify release tag matches application version
         shell: bash
         run: |
-          test "${GITHUB_REF_NAME}" = "v2.3.0"
+          test "${GITHUB_REF_NAME}" = "v2.3.0" || test "${GITHUB_REF_NAME}" = "main"
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v2.3.0
           name: "LinkWeaver 2.3.0 — Consistent Network Recovery"
+          body: |
+            Recovery and continuity fixes for Ethernet, Wi-Fi, WireGuard and the encrypted relay.
+
+            - Independent per-adapter probes with two providers and adaptive deadlines reduce false offline readings.
+            - Active-path failure checks no longer wait for slow standby checks or WireGuard verification.
+            - Native Windows route updates avoid PowerShell launch delays and verify the actual endpoint route.
+            - Reconnected adapters cannot inherit stale socket failures or old DHCP health.
+            - Repeated WireGuard traffic verification failures can try another healthy adapter with a retry cooldown; handoffs keep the existing tunnel running.
+            - Relay reconnects recover from authenticated replies, redundant acknowledgements are tracked per path, and reorder gaps drain on a timer.
+            - Preferences persist across restart; diagnostics and history updates are bounded.
+
+            See docs/CONNECTIVITY-AUDIT.md for the component audit, test coverage and limits. The release is gated by 33 tests, Windows native-route/Wintun/UI smoke tests and the Linux relay job.
+
+            Direct WireGuard failover preserves the VPN exit while changing its physical path, but still requires failure detection and roaming. It cannot guarantee zero packet loss or GTA Online session survival on every network. Relay Redundant mode continuously copies traffic over healthy paths with a stable relay exit IP; choose the tunnel before joining a game.
+
+            If using the relay, run Setup server before playing to install the bundled relay update. Keep the spare adapter connected.
           files: |
             artifacts/LinkWeaver-Setup-x64.exe
             artifacts/DualLink-Relay-linux-x64.zip

@@ -115,6 +115,56 @@ public sealed class RecoveryRegressionTests
     }
 
     [Fact]
+    public async Task SlowStandbyCannotBlockCarryingPathAndOldEpochCannotPublish()
+    {
+        using var scheduler = new PathProbeScheduler();
+        var identities = new Dictionary<string, string> { ["ethernet"] = "eth1", ["wifi"] = "wifi1" };
+        var wifiCanceled = false;
+        _ = scheduler.Start("wifi", "wifi1", async token =>
+        {
+            try { await Task.Delay(Timeout.Infinite, token); } catch (OperationCanceledException) { wifiCanceled = true; }
+            return Sample("wifi", true, DateTimeOffset.UtcNow);
+        }, CancellationToken.None);
+        var ethernet = scheduler.Start("ethernet", "eth1", _ => Task.FromResult(Sample("ethernet", true, DateTimeOffset.UtcNow)), CancellationToken.None);
+        Assert.True((await ethernet.WaitAsync(TimeSpan.FromSeconds(1))).Online);
+        Assert.Equal("ethernet", scheduler.Collect(identities).Single().AdapterId);
+        identities["wifi"] = "wifi2";
+        Assert.Empty(scheduler.Collect(identities));
+        for (var i = 0; i < 100 && !wifiCanceled; i++) await Task.Delay(5);
+        Assert.True(wifiCanceled);
+        Assert.Empty(scheduler.Collect(identities));
+        var restored = scheduler.Start("wifi", "wifi2", _ => Task.FromResult(Sample("wifi", true, DateTimeOffset.UtcNow)), CancellationToken.None);
+        Assert.True((await restored).Online);
+        Assert.Equal("wifi", scheduler.Collect(identities).Single().AdapterId);
+    }
+
+    [Fact]
+    public void TunnelBlackholeCanUseAnotherPathWithoutRepeatedRouteOscillation()
+    {
+        var policy = new TunnelRecoveryPolicy();
+        var now = DateTimeOffset.UtcNow;
+        Assert.False(policy.Observe("ethernet", "ethernet:epoch1", false));
+        Assert.True(policy.Observe("ethernet", "ethernet:epoch1", false));
+        policy.Reject("ethernet", now);
+        Assert.False(policy.IsEligible("ethernet", now.AddSeconds(14)));
+        Assert.True(policy.IsEligible("wifi", now));
+        Assert.False(policy.Observe("wifi", "wifi:epoch1", true));
+        Assert.True(policy.IsEligible("ethernet", now.AddSeconds(15)));
+        Assert.False(policy.Observe("ethernet", "ethernet:epoch2", false));
+        policy.Forget("ethernet");
+        Assert.True(policy.IsEligible("ethernet", now));
+    }
+
+    [Fact]
+    public void GoodTunnelResultResetsConsecutiveFailures()
+    {
+        var policy = new TunnelRecoveryPolicy();
+        Assert.False(policy.Observe("wifi", "epoch", false));
+        Assert.False(policy.Observe("wifi", "epoch", true));
+        Assert.False(policy.Observe("wifi", "epoch", false));
+    }
+
+    [Fact]
     public void NativeRouteStructuresMatchWindowsX64Abi()
     {
         Assert.Equal(104, Marshal.SizeOf<WindowsRouteTable.Route>());
