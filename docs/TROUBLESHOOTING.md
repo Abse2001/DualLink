@@ -47,26 +47,19 @@ sudo ss -lunp | grep ':443 '
 
 ## Ethernet Internet dies but the cable stays connected
 
-Install 2.2.11 or later. The UI must say the replacement adapter is **verified** or list it under **Tunnel**. A green link-state icon alone is not proof of upstream Internet.
+Use 2.3.0 or later. The carrying path is removed on its first failed round, while interface-change notifications interrupt obsolete samples. Each NIC has independently bound HTTPS tests to Cloudflare and Google; a filtered destination or a 150–200 ms hotspot should not repeatedly mark working Wi-Fi offline.
 
-If a physical adapter was unplugged while WireGuard remained active, use 2.2.15 or later. LinkWeaver immediately moves the WireGuard endpoint route after its interface-bound backup probe succeeds, then performs slower verification. It also recreates adapter-bound probe routes on every link-state transition and explicitly moves the endpoint route back to the configured preferred adapter after recovery. Older builds could delay the endpoint move behind verification or retain the NIC's address/gateway while Windows silently removed its host route.
+Routes use native Windows calls and are updated in place. Probe bypass routes are audited every second, and DHCP address/gateway/index changes clear cached health. Tunnel verification is separate from the monitor and bound to the tunnel, so it cannot delay another failover or pass through a physical route.
 
-If Ethernet remains listed as Offline after its upstream Internet returns, use 2.2.17 or later. An upstream-only outage can leave the Windows link, address, and gateway unchanged, so older versions did not rebuild the Ethernet-specific probe route. LinkWeaver now repairs that route at a rate-limited cadence and immediately re-probes Ethernet without stopping WireGuard.
+The dashboard must say **verified** for a confirmed WireGuard path or list an authenticated relay path under **Tunnel**. **routed, verifying** means the physical endpoint route moved but end-to-end tunnel traffic has not yet been confirmed. A green physical probe alone does not prove the tunnel works.
 
-Version 2.2.19 keeps physical adapter probes separate from WireGuard tunnel verification. Earlier builds could pin the verification address to Ethernet, then repeatedly rebuild the Wi-Fi endpoint route while waiting for a verification that was accidentally following dead Ethernet. The routed endpoint now remains stable while WireGuard roams, and the dashboard shows **routed, verifying** until the tunnel is confirmed. In Aggressive mode the active path still uses a 125 ms probe deadline and one failed round. Use **Prepare Proton config** again and import the generated configuration to enable the two-second persistent keepalive.
+For upstream-only failure, Aggressive starts at 250 ms, Fast 300 ms, Balanced 350 ms and Stable 500 ms; the deadline increases with measured latency up to 1500 ms. Physical disconnect response does not wait for these deadlines when a recently verified backup is available. Ethernet returns to preference after one second of successful recovery rather than on a single transient reply.
 
-Two real TCP attempts are bound to each adapter and run concurrently every 75 ms,
-with a 225 ms timeout.
-If both fail, LinkWeaver immediately classifies that adapter as `Link up — Internet
-unreachable`; it does not wait for Windows to report a cable disconnect.
+Keep using an already prepared profile with `PersistentKeepalive = 2`. If the profile was never prepared, deactivate it, use **Prepare Proton config**, import the generated `-DualLink.conf`, and reactivate it before joining a game. The app never restarts WireGuard during handoff.
 
-A manually selected preferred adapter remains preferred throughout an outage.
-The backup is temporary: the first successful preferred-path probe triggers
-end-to-end route verification and immediate reclamation of that adapter.
+Do not use `1.1.1.1` or `8.8.8.8` as end-to-end ping tests: these are physical probe destinations that intentionally bypass the VPN. Use `ping 208.67.222.222 -t` or the repository's [continuity capture script](../scripts/Test-Continuity.ps1). Export history after an interruption; it records link state, address/gateway, reachability, errors, route changes and observed public IP.
 
-Export the history CSV after an interruption. `State` distinguishes a physically disconnected link from a link that remains up without IPv4, without a gateway, or without upstream Internet. The export also records active-path transitions, WireGuard/bonding state, public-IP changes, probe errors, throughput, latency, and recovery duration.
-
-LinkWeaver intentionally keeps the WireGuard service running during a path switch so active sessions are not torn down. Version 2.2.16 also preserves the newly selected endpoint route while tunnel verification catches up, preventing the next monitor round from pointing WireGuard back to dead Ethernet. If Proton remains offline after the endpoint route moves, deactivate/reactivate WireGuard manually after the affected session is already lost, then inspect `%LOCALAPPDATA%\DualLink\duallink.log`.
+See [the full code audit](CONNECTIVITY-AUDIT.md) for exact changes, tests and limitations. Direct WireGuard failover has a detection/roaming interval. For continuous packet copies across both independent links, use the relay's **Redundant** mode and update the relay through **Setup server** outside an active game session. Do not run both exit tunnels concurrently.
 
 ## Failover shows traffic on both adapters
 

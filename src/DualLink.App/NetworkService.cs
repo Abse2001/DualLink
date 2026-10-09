@@ -5,6 +5,8 @@ using System.Net.Http;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Text.RegularExpressions;
+using System.ComponentModel;
+using System.IO;
 using DualLink.Core;
 
 namespace DualLink.App;
@@ -16,14 +18,12 @@ public sealed class NetworkService
     // verification. A /32 probe route intentionally bypasses WireGuard; reusing
     // that address for tunnel verification made a dead Ethernet route look like a
     // failed WireGuard handoff and caused the endpoint route to be rebuilt forever.
-    private static readonly string[] ProbeTargets = ["8.8.8.8", "8.8.4.4", "9.9.9.9", "149.112.112.112"];
-    private static readonly string[] LegacyProbeTargets = ["1.1.1.1"];
-    private const string VerificationTarget = "1.0.0.1";
-    private const string TunnelVerificationTarget = "1.1.1.1";
-    private readonly Dictionary<string, string> _probeTargetAssignments = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly string[] LegacyProbeTargets = ["8.8.4.4", "9.9.9.9", "149.112.112.112", "1.0.0.1"];
     private readonly HashSet<string> _observedPhysicalAdapters = new(StringComparer.OrdinalIgnoreCase);
-    private readonly ConcurrentDictionary<string, DateTimeOffset> _lastProbeRouteRepair = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, double> _latencies = new(StringComparer.OrdinalIgnoreCase);
     private string? _probeRouteSignature;
+    private DateTimeOffset _lastProbeRouteAudit;
+    private readonly HashSet<int> _cleanedInterfaces = [];
 
     public IReadOnlyDictionary<string, AdapterByteCounters> GetAdapterByteCounters()
     {
@@ -47,6 +47,27 @@ public sealed class NetworkService
         n.OperationalStatus == OperationalStatus.Up &&
         ($"{n.Name} {n.Description}".Contains("Proton", StringComparison.OrdinalIgnoreCase) ||
          $"{n.Name} {n.Description}".Contains("WireGuard", StringComparison.OrdinalIgnoreCase)));
+
+    public async Task<IPAddress?> GetActiveWireGuardEndpointAsync(CancellationToken token)
+    {
+        var executable = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "WireGuard", "wg.exe");
+        if (!File.Exists(executable)) return null;
+        try
+        {
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+            deadline.CancelAfter(TimeSpan.FromSeconds(1));
+            // Query only endpoints; never request a config dump or private keys.
+            var output = await RunAsync(executable, "show all endpoints", deadline.Token);
+            var names = NetworkInterface.GetAllNetworkInterfaces().Where(x => x.OperationalStatus == OperationalStatus.Up)
+                .Select(x => x.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var endpoints = output.Split('\n').Select(line => line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
+                .Where(fields => fields.Length == 3 && names.Contains(fields[0]))
+                .Select(fields => fields[2].Split(':')[0]).Select(value => IPAddress.TryParse(value, out var ip) ? ip : null)
+                .Where(ip => ip?.AddressFamily == AddressFamily.InterNetwork).Distinct().ToArray();
+            return endpoints.Length == 1 ? endpoints[0] : null;
+        }
+        catch (Exception error) when (error is Win32Exception or InvalidOperationException or OperationCanceledException) { return null; }
+    }
 
     public async Task<string?> GetPublicIpAsync(CancellationToken token)
     {
@@ -75,7 +96,9 @@ public sealed class NetworkService
         .Select(n =>
         {
             var props = n.GetIPProperties();
-            var ipv4 = props.UnicastAddresses.FirstOrDefault(x => x.Address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork && !IPAddress.IsLoopback(x.Address));
+            var ipv4 = props.UnicastAddresses.FirstOrDefault(x => x.Address.AddressFamily == AddressFamily.InterNetwork &&
+                !IPAddress.IsLoopback(x.Address) && !x.Address.ToString().StartsWith("169.254.") &&
+                x.DuplicateAddressDetectionState is not (DuplicateAddressDetectionState.Tentative or DuplicateAddressDetectionState.Duplicate));
             var gateway = props.GatewayAddresses
                 .Select(x => x.Address)
                 .FirstOrDefault(x => x.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork && !x.Equals(IPAddress.Any));
@@ -93,76 +116,50 @@ public sealed class NetworkService
         return !excluded.Any(value => identity.Contains(value, StringComparison.OrdinalIgnoreCase));
     }
 
-    public async Task<IReadOnlyDictionary<string, string>> PrepareProbeRoutesAsync(
+    public Task<IReadOnlyDictionary<string, string>> PrepareProbeRoutesAsync(
         IReadOnlyList<AdapterInfo> adapters, bool tunnelActive)
     {
-        // Keep an adapter's target for the lifetime of the application. Re-indexing
-        // the remaining adapters when a cable was removed made Wi-Fi inherit the
-        // Ethernet target and left stale /32 routes that could survive reconnection.
-        foreach (var adapter in adapters.Where(x => !_probeTargetAssignments.ContainsKey(x.Id)))
-        {
-            var used = _probeTargetAssignments.Values.ToHashSet(StringComparer.OrdinalIgnoreCase);
-            _probeTargetAssignments[adapter.Id] = ProbeTargets.FirstOrDefault(x => !used.Contains(x))
-                ?? ProbeTargets[_probeTargetAssignments.Count % ProbeTargets.Length];
-        }
-        var assignments = adapters.ToDictionary(
-            x => x.Id, x => _probeTargetAssignments[x.Id], StringComparer.OrdinalIgnoreCase);
-
-        // Status is part of the fingerprint because Windows may remove an active
-        // host route on media disconnect while retaining the NIC's old address and
-        // gateway. Without this, reconnecting Ethernet looked identical and its
-        // physical bypass route was never recreated under WireGuard's /1 routes.
+        var assignments = adapters.ToDictionary(x => x.Id, _ => ConnectivityPolicy.PhysicalTargets[0], StringComparer.OrdinalIgnoreCase);
         var signature = $"{tunnelActive}|" + string.Join('|', adapters.OrderBy(x => x.Id, StringComparer.OrdinalIgnoreCase)
-            .Select(x => $"{x.Id}:{x.Status}:{x.InterfaceIndex}:{x.Address}:{x.Gateway}:{assignments[x.Id]}"));
-        if (signature == _probeRouteSignature) return assignments;
+            .Select(x => $"{x.Id}:{x.Status}:{x.InterfaceIndex}:{x.Address}:{x.Gateway}"));
+        if (signature == _probeRouteSignature && DateTimeOffset.UtcNow - _lastProbeRouteAudit < TimeSpan.FromSeconds(1))
+            return Task.FromResult<IReadOnlyDictionary<string, string>>(assignments);
 
-        // Route preparation is deliberately serialized. The old implementation
-        // changed host routes inside concurrent probes, allowing two adapters to
-        // race for the same destination and making healthy paths flicker offline.
-        // Also remove the v2.2.18 physical /32 for 1.1.1.1. ActiveStore routes can
-        // survive an application upgrade and would keep hijacking the new tunnel
-        // verification until Windows restarts.
-        foreach (var adapter in adapters.Where(x => x.InterfaceIndex >= 0))
-            foreach (var target in LegacyProbeTargets)
-                await RunPowerShellAsync($"Remove-NetRoute -DestinationPrefix '{target}/32' -InterfaceIndex {adapter.InterfaceIndex} -AddressFamily IPv4 -Confirm:$false -ErrorAction SilentlyContinue");
-        foreach (var adapter in adapters.Where(x => x.Gateway is not null))
-            await EnsureHostRouteAsync(assignments[adapter.Id], adapter, 5);
-        _probeRouteSignature = signature;
-        return assignments;
+        var success = true;
+        foreach (var adapter in adapters.Where(IsUsable))
+        {
+            try
+            {
+                if (!_cleanedInterfaces.Contains(adapter.InterfaceIndex))
+                {
+                    WindowsRouteTable.RemoveHosts(LegacyProbeTargets.Select(IPAddress.Parse), [adapter.InterfaceIndex]);
+                    _cleanedInterfaces.Add(adapter.InterfaceIndex);
+                }
+                // Both targets exist on every interface. IP_UNICAST_IF and Bind
+                // select the exact NIC; no assignment reuse or four-NIC limit.
+                foreach (var target in ConnectivityPolicy.PhysicalTargets)
+                    WindowsRouteTable.EnsureHost(IPAddress.Parse(target), adapter.InterfaceIndex, adapter.Gateway!, 5);
+            }
+            catch (Win32Exception error)
+            {
+                success = false;
+                AppLog.Write($"Probe route preparation for {adapter.Name}: {error.Message}");
+            }
+        }
+        _probeRouteSignature = success ? signature : null;
+        _lastProbeRouteAudit = DateTimeOffset.UtcNow;
+        return Task.FromResult<IReadOnlyDictionary<string, string>>(assignments);
     }
 
-    public async Task<bool> RepairProbeRouteAsync(AdapterInfo adapter, string target)
-    {
-        if (adapter.Status != OperationalStatus.Up || adapter.Address is null || adapter.Gateway is null)
-            return false;
-
-        // An upstream-only outage does not change the NIC's Windows status,
-        // address, interface index, or gateway. The normal route fingerprint then
-        // remains unchanged even if Windows kept a stale adapter-bound host route.
-        // Recreate that one route at a bounded cadence and immediately re-probe so
-        // a preferred Ethernet path can rejoin while WireGuard remains active.
-        var now = DateTimeOffset.UtcNow;
-        if (_lastProbeRouteRepair.TryGetValue(adapter.Id, out var lastRepair) &&
-            now - lastRepair < TimeSpan.FromSeconds(1))
-            return false;
-
-        _lastProbeRouteRepair[adapter.Id] = now;
-        await EnsureHostRouteAsync(target, adapter, 5);
-        _probeRouteSignature = null;
-        return true;
-    }
-
-    public void MarkProbeRouteHealthy(string adapterId) =>
-        _lastProbeRouteRepair.TryRemove(adapterId, out _);
+    public static bool IsUsable(AdapterInfo adapter) => adapter.Status == OperationalStatus.Up &&
+        adapter.Address is not null && adapter.Gateway is not null && adapter.InterfaceIndex > 0;
 
     public async Task<ProbeResult> ProbeAsync(AdapterInfo adapter, string host, bool tunnelActive,
         CancellationToken token, string? assignedTarget = null, int timeoutMilliseconds = 225)
     {
-        // A prepared WireGuard config uses /1 routes instead of the Windows /0 kill
-        // switch. A single public ICMP target is pinned to each physical adapter so
-        // upstream loss (including a cellular call) is detected without routing game
-        // traffic outside the tunnel.
-        var target = assignedTarget ?? host;
+        // A prepared WireGuard config uses /1 routes instead of the Windows /0
+        // firewall policy. Two HTTPS targets are routed over every physical NIC;
+        // game traffic remains inside the live tunnel.
         if (adapter.Status != OperationalStatus.Up)
             // A driver-reported link loss is definitive. Do not hold the dead path
             // online for an extra stabilization cycle before failover.
@@ -171,15 +168,13 @@ public sealed class NetworkService
         if (adapter.Address is null)
             return new(adapter.Id, DateTimeOffset.Now, false, 0, 0, 100, 0,
                 "Physical link is up but no IPv4 address was assigned");
-        if (string.IsNullOrWhiteSpace(target))
-            return new(adapter.Id, DateTimeOffset.Now, false, 0, 0, 100, 0, "No IPv4 gateway was found");
-
         if (adapter.Gateway is null)
             return new(adapter.Id, DateTimeOffset.Now, false, 0, 0, 100, 0,
                 "Physical link is up but no IPv4 gateway was found");
 
-        const int sampleCount = 2;
-        async Task<(double? Latency, string? Error)> SampleAsync()
+        var timeout = ConnectivityPolicy.ProbeTimeout(timeoutMilliseconds,
+            _latencies.TryGetValue(adapter.Id, out var latency) ? latency : null);
+        async Task<double?> SampleAsync(string target, CancellationToken attemptToken)
         {
             try
             {
@@ -190,127 +185,112 @@ public sealed class NetworkService
                 socket.SetSocketOption(SocketOptionLevel.IP, (SocketOptionName)31,
                     IPAddress.HostToNetworkOrder(adapter.InterfaceIndex));
                 socket.Bind(new IPEndPoint(adapter.Address!, 0));
-                using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
-                deadline.CancelAfter(TimeSpan.FromMilliseconds(Math.Clamp(timeoutMilliseconds, 75, 1000)));
+                using var deadline = CancellationTokenSource.CreateLinkedTokenSource(attemptToken);
+                deadline.CancelAfter(TimeSpan.FromMilliseconds(timeout));
                 var stopwatch = Stopwatch.StartNew();
                 await socket.ConnectAsync(new IPEndPoint(IPAddress.Parse(target), 443), deadline.Token);
                 stopwatch.Stop();
-                return socket.Connected ? (stopwatch.Elapsed.TotalMilliseconds, null) : (null, "TCP probe failed");
+                return socket.Connected ? stopwatch.Elapsed.TotalMilliseconds : null;
             }
             catch (Exception ex) when (ex is SocketException or OperationCanceledException)
             {
-                return (null, ex is OperationCanceledException ? "Probe timed out" : ex.Message);
+                token.ThrowIfCancellationRequested();
+                return null;
             }
         }
         // Run samples concurrently: a dead upstream is detected in one timeout
         // window instead of waiting for two sequential 350 ms timeouts.
-        var results = await Task.WhenAll(Enumerable.Range(0, sampleCount).Select(_ => SampleAsync()));
-        var samples = results.Where(x => x.Latency.HasValue).Select(x => x.Latency!.Value).ToList();
-        var failures = results.Count(x => !x.Latency.HasValue);
-        var error = results.Select(x => x.Error).FirstOrDefault(x => !string.IsNullOrWhiteSpace(x));
-        var online = samples.Count > 0;
-        var latency = online ? samples.Average() : 0;
-        var jitter = samples.Count > 1 ? samples.Zip(samples.Skip(1), (a, b) => Math.Abs(a - b)).Average() : 0;
-        var loss = failures / (double)sampleCount * 100;
-        // Both attempts are interface-bound and run concurrently. If neither can
-        // establish a real TCP connection, treat the upstream as dead immediately;
-        // waiting for another monitor round leaves applications on a black-holed
-        // path even though the Ethernet/Wi-Fi link itself still reports Up.
-        if (!online)
-            error = $"Internet unreachable: both interface-bound TCP probes failed ({error ?? "no response"})";
-        return new(adapter.Id, DateTimeOffset.Now, online, latency, jitter, loss,
-            LinkScorer.Calculate(online, latency, jitter, loss), error);
-    }
-
-    public async Task<bool> VerifyBondedInternetAsync(CancellationToken token)
-    {
-        try
+        var result = await ConnectivityPolicy.FirstSuccessAsync(ConnectivityPolicy.PhysicalTargets.Select(target =>
+            new Func<CancellationToken, Task<double?>>(attemptToken => SampleAsync(target, attemptToken))), token);
+        var probe = ConnectivityPolicy.Summarize(adapter.Id, DateTimeOffset.Now, new double?[] { result });
+        if (probe.Online)
         {
-            var result = await RunAsync("ping.exe", "-4 -n 1 -w 3000 1.1.1.1", token);
-            return Regex.IsMatch(result, @"time[=<](\d+)ms", RegexOptions.IgnoreCase);
+            var prior = _latencies.GetValueOrDefault(adapter.Id, probe.LatencyMs);
+            var smoothed = prior * .8 + probe.LatencyMs * .2;
+            var jitter = Math.Abs(probe.LatencyMs - prior);
+            _latencies[adapter.Id] = smoothed;
+            probe = probe with { LatencyMs = smoothed, JitterMs = jitter, Score = LinkScorer.Calculate(true, smoothed, jitter, 0) };
         }
-        catch { return false; }
+        return probe;
     }
 
-    public async Task<bool> VerifyRoutedInternetAsync(CancellationToken token)
+    public Task<bool> VerifyBondedInternetAsync(CancellationToken token) => VerifyTunnelInternetAsync("DualLink Bond", token);
+
+    public Task<bool> VerifyRoutedInternetAsync(CancellationToken token) => VerifyTunnelInternetAsync(null, token);
+
+    private async Task<bool> VerifyTunnelInternetAsync(string? alias, CancellationToken token)
+    {
+        // Bind verification to the tunnel itself. A successful direct physical
+        // connection can never be mistaken for a successful VPN handoff.
+        var tunnel = NetworkInterface.GetAllNetworkInterfaces().FirstOrDefault(n => n.OperationalStatus == OperationalStatus.Up &&
+            (alias is not null ? n.Name == alias : $"{n.Name} {n.Description}".Contains("WireGuard", StringComparison.OrdinalIgnoreCase) ||
+                $"{n.Name} {n.Description}".Contains("Proton", StringComparison.OrdinalIgnoreCase)));
+        if (tunnel is null) return false;
+        var properties = tunnel.GetIPProperties();
+        var address = properties.UnicastAddresses.FirstOrDefault(x => x.Address.AddressFamily == AddressFamily.InterNetwork)?.Address;
+        var index = properties.GetIPv4Properties()?.Index;
+        if (address is null || index is null) return false;
+        var results = await Task.WhenAll(ConnectivityPolicy.TunnelTargets.Select(async target =>
+            await ConnectAsync(address, index.Value, target, 800, token)));
+        return results.Any(x => x.HasValue);
+    }
+
+    private static async Task<double?> ConnectAsync(IPAddress source, int index, string target, int timeout, CancellationToken token)
     {
         try
         {
             using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            socket.SetSocketOption(SocketOptionLevel.IP, (SocketOptionName)31, IPAddress.HostToNetworkOrder(index));
+            socket.Bind(new IPEndPoint(source, 0));
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
-            deadline.CancelAfter(TimeSpan.FromMilliseconds(900));
-            await socket.ConnectAsync(new IPEndPoint(IPAddress.Parse(TunnelVerificationTarget), 443), deadline.Token);
-            return socket.Connected;
+            deadline.CancelAfter(timeout);
+            var clock = Stopwatch.StartNew();
+            await socket.ConnectAsync(new IPEndPoint(IPAddress.Parse(target), 443), deadline.Token);
+            return socket.Connected ? clock.Elapsed.TotalMilliseconds : null;
         }
         catch (Exception error) when (error is SocketException or OperationCanceledException)
         {
-            return false;
+            token.ThrowIfCancellationRequested();
+            return null;
         }
     }
 
-    public async Task<int?> GetPreferredRouteInterfaceAsync(IPAddress endpoint)
-    {
-        var command =
-            $"$route = Get-NetRoute -DestinationPrefix '{endpoint}/32' -AddressFamily IPv4 -ErrorAction SilentlyContinue | " +
-            "Sort-Object @{Expression={$_.RouteMetric + (Get-NetIPInterface -InterfaceIndex $_.InterfaceIndex -AddressFamily IPv4).InterfaceMetric}} | Select-Object -First 1; " +
-            "if ($route) { $route.InterfaceIndex }";
-        var result = await RunPowerShellAsync(command);
-        return int.TryParse(result.Trim(), out var index) ? index : null;
-    }
+    public Task<int?> GetPreferredRouteInterfaceAsync(IPAddress endpoint) => Task.FromResult(WindowsRouteTable.BestInterface(endpoint));
 
     public async Task<double?> MeasureBondedInternetLatencyAsync(CancellationToken token)
     {
         try
         {
-            var result = await RunAsync("ping.exe", "-4 -n 1 -w 1500 1.1.1.1", token);
+            var result = await RunAsync("ping.exe", "-4 -n 1 -w 500 208.67.222.222", token);
             var match = Regex.Match(result, @"time[=<](\d+)ms", RegexOptions.IgnoreCase);
             return match.Success ? double.Parse(match.Groups[1].Value) : null;
         }
         catch { return null; }
     }
 
-    public async Task ApplyMetricsAsync(IEnumerable<AdapterInfo> adapters, string preferredId, int preferredMetric, int backupMetric)
+    public Task ApplyMetricsAsync(IEnumerable<AdapterInfo> adapters, string preferredId, int preferredMetric, int backupMetric)
     {
-        var commands = new List<string>();
-        foreach (var adapter in adapters.Where(x => x.InterfaceIndex >= 0))
+        // Promote the selected default path before demoting others. WireGuard's
+        // underlay/MTU selection also observes default routes and interface metrics.
+        foreach (var adapter in adapters.Where(IsUsable).OrderByDescending(x => x.Id == preferredId))
         {
             var metric = adapter.Id == preferredId ? preferredMetric : backupMetric;
-            commands.Add($"Set-NetIPInterface -InterfaceIndex {adapter.InterfaceIndex} -AddressFamily IPv4 -AutomaticMetric Disabled -InterfaceMetric {metric} -ErrorAction Stop");
+            WindowsRouteTable.SetMetric(adapter.InterfaceIndex, metric);
         }
-        if (commands.Count > 0) await RunPowerShellAsync(string.Join("; ", commands));
+        return Task.CompletedTask;
     }
 
     public async Task<bool> VerifyAdapterInternetAsync(AdapterInfo adapter,
         IReadOnlyList<AdapterInfo> adapters, CancellationToken token)
     {
-        if (adapter.Address is null || adapter.Gateway is null || adapter.InterfaceIndex < 0) return false;
-        try
-        {
-            // Use a dedicated verification destination so per-adapter health-check
-            // routes can never redirect this end-to-end test through another NIC.
-            foreach (var candidate in adapters.Where(x => x.InterfaceIndex >= 0))
-                await RunPowerShellAsync($"Remove-NetRoute -DestinationPrefix '{VerificationTarget}/32' -InterfaceIndex {candidate.InterfaceIndex} -AddressFamily IPv4 -Confirm:$false -ErrorAction SilentlyContinue");
-            await EnsureHostRouteAsync(VerificationTarget, adapter, 1);
-            using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-            socket.SetSocketOption(SocketOptionLevel.IP, (SocketOptionName)31,
-                IPAddress.HostToNetworkOrder(adapter.InterfaceIndex));
-            socket.Bind(new IPEndPoint(adapter.Address, 0));
-            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
-            deadline.CancelAfter(TimeSpan.FromMilliseconds(650));
-            await socket.ConnectAsync(new IPEndPoint(IPAddress.Parse(VerificationTarget), 443), deadline.Token);
-            return socket.Connected;
-        }
-        catch (Exception error) when (error is SocketException or OperationCanceledException)
-        {
-            return false;
-        }
+        return (await ProbeAsync(adapter, "", false, token, timeoutMilliseconds: 350)).Online;
     }
 
     public async Task ApplyWireGuardEndpointRoutesAsync(IEnumerable<AdapterInfo> adapters, IPAddress endpoint, string? preferredId)
     {
-        foreach (var adapter in adapters.Where(x => x.Gateway is not null))
+        foreach (var adapter in adapters.Where(IsUsable))
         {
-            var metric = adapter.Id == preferredId ? 1 : 50;
+            var metric = adapter.Id == preferredId ? 1 : 5000;
             await EnsureHostRouteAsync(endpoint.ToString(), adapter, metric);
         }
     }
@@ -318,34 +298,28 @@ public sealed class NetworkService
     public async Task<bool> MoveWireGuardEndpointRouteAsync(IReadOnlyList<AdapterInfo> adapters,
         IPAddress endpoint, AdapterInfo selected)
     {
-        if (selected.Gateway is null || selected.InterfaceIndex < 0) return false;
+        if (!IsUsable(selected)) return false;
 
-        // Do the complete underlay switch in one PowerShell process. Starting a
-        // process for every route used to leave WireGuard waiting behind several
-        // hundred milliseconds of route maintenance after a cable disconnect.
-        // Install the selected route before demoting backups so an endpoint route
-        // exists throughout the switch and Windows emits an immediate route change
-        // notification to WireGuard's connected UDP socket.
-        var prefix = $"{endpoint}/32";
-        var commands = new List<string>
+        // Native updates preserve existing rows and avoid process launch latency.
+        // Keep both the exact endpoint route and default-interface preference in
+        // agreement, then ask Windows for the actual winning route.
+        WindowsRouteTable.EnsureHost(endpoint, selected.InterfaceIndex, selected.Gateway!, 1);
+        WindowsRouteTable.SetMetric(selected.InterfaceIndex, 5);
+        foreach (var backup in adapters.Where(x => x.Id != selected.Id && IsUsable(x)))
         {
-            $"Set-NetIPInterface -InterfaceIndex {selected.InterfaceIndex} -AddressFamily IPv4 -AutomaticMetric Disabled -InterfaceMetric 5 -ErrorAction SilentlyContinue",
-            $"Remove-NetRoute -DestinationPrefix '{prefix}' -InterfaceIndex {selected.InterfaceIndex} -AddressFamily IPv4 -Confirm:$false -ErrorAction SilentlyContinue",
-            $"New-NetRoute -DestinationPrefix '{prefix}' -InterfaceIndex {selected.InterfaceIndex} -NextHop '{selected.Gateway}' -RouteMetric 1 -PolicyStore ActiveStore -ErrorAction Stop | Out-Null"
-        };
-        foreach (var backup in adapters.Where(x => x.Id != selected.Id && x.Gateway is not null && x.InterfaceIndex >= 0))
-        {
-            commands.Add($"Set-NetIPInterface -InterfaceIndex {backup.InterfaceIndex} -AddressFamily IPv4 -AutomaticMetric Disabled -InterfaceMetric 500 -ErrorAction SilentlyContinue");
-            commands.Add($"Remove-NetRoute -DestinationPrefix '{prefix}' -InterfaceIndex {backup.InterfaceIndex} -AddressFamily IPv4 -Confirm:$false -ErrorAction SilentlyContinue");
-            commands.Add($"New-NetRoute -DestinationPrefix '{prefix}' -InterfaceIndex {backup.InterfaceIndex} -NextHop '{backup.Gateway}' -RouteMetric 500 -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Out-Null");
+            try
+            {
+                WindowsRouteTable.EnsureHost(endpoint, backup.InterfaceIndex, backup.Gateway!, 5000);
+                WindowsRouteTable.SetMetric(backup.InterfaceIndex, 500);
+            }
+            catch (Win32Exception error) { AppLog.Write($"Standby endpoint route for {backup.Name}: {error.Message}"); }
         }
-        await RunPowerShellAsync(string.Join("; ", commands));
         return await GetPreferredRouteInterfaceAsync(endpoint) == selected.InterfaceIndex;
     }
 
     public async Task ApplyBondingEndpointRoutesAsync(IEnumerable<AdapterInfo> adapters, IPAddress endpoint)
     {
-        foreach (var adapter in adapters.Where(x => x.Gateway is not null))
+        foreach (var adapter in adapters.Where(IsUsable))
             await EnsureHostRouteAsync(endpoint.ToString(), adapter, 1);
     }
 
@@ -371,13 +345,10 @@ public sealed class NetworkService
             await RunPowerShellAsync($"Remove-NetRoute -DestinationPrefix '{endpoint}/32' -InterfaceIndex {adapter.InterfaceIndex} -AddressFamily IPv4 -Confirm:$false -ErrorAction SilentlyContinue");
     }
 
-    private static async Task EnsureHostRouteAsync(string destination, AdapterInfo adapter, int metric)
+    private static Task EnsureHostRouteAsync(string destination, AdapterInfo adapter, int metric)
     {
-        if (adapter.Gateway is null) return;
-        var prefix = $"{destination}/32";
-        var command = $"Remove-NetRoute -DestinationPrefix '{prefix}' -InterfaceIndex {adapter.InterfaceIndex} -AddressFamily IPv4 -Confirm:$false -ErrorAction SilentlyContinue; " +
-                      $"New-NetRoute -DestinationPrefix '{prefix}' -InterfaceIndex {adapter.InterfaceIndex} -NextHop '{adapter.Gateway}' -RouteMetric {metric} -PolicyStore ActiveStore -ErrorAction Stop | Out-Null";
-        await RunPowerShellAsync(command);
+        if (IsUsable(adapter)) WindowsRouteTable.EnsureHost(IPAddress.Parse(destination), adapter.InterfaceIndex, adapter.Gateway!, metric);
+        return Task.CompletedTask;
     }
 
     public async Task RestoreAutomaticMetricsAsync() =>
@@ -385,11 +356,14 @@ public sealed class NetworkService
 
     public async Task RestoreManagedRoutesAsync(IEnumerable<AdapterInfo> adapters, IPAddress? endpoint)
     {
-        var prefixes = ProbeTargets.Concat(LegacyProbeTargets).Append(VerificationTarget).Select(x => $"'{x}/32'").ToList();
-        if (endpoint is not null) prefixes.Add($"'{endpoint}/32'");
-        foreach (var adapter in adapters)
-            await RunPowerShellAsync($"Remove-NetRoute -DestinationPrefix @({string.Join(',', prefixes)}) -InterfaceIndex {adapter.InterfaceIndex} -AddressFamily IPv4 -Confirm:$false -ErrorAction SilentlyContinue");
-        await RestoreAutomaticMetricsAsync();
+        var physical = adapters.ToArray();
+        var destinations = ConnectivityPolicy.PhysicalTargets.Concat(LegacyProbeTargets).Select(IPAddress.Parse).ToList();
+        if (endpoint is not null) destinations.Add(endpoint);
+        WindowsRouteTable.RemoveHosts(destinations, physical.Select(x => x.InterfaceIndex));
+        foreach (var adapter in physical.Where(IsUsable)) WindowsRouteTable.SetMetric(adapter.InterfaceIndex, 0, automatic: true);
+        _probeRouteSignature = null;
+        _cleanedInterfaces.Clear();
+        await Task.CompletedTask;
     }
 
     private static Task<string> RunPowerShellAsync(string command) => RunAsync("powershell.exe", $"-NoProfile -NonInteractive -Command \"{command}\"", CancellationToken.None);
@@ -398,10 +372,18 @@ public sealed class NetworkService
     {
         using var process = new Process { StartInfo = new ProcessStartInfo(file, arguments) { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true } };
         process.Start();
-        var output = await process.StandardOutput.ReadToEndAsync(token);
-        var error = await process.StandardError.ReadToEndAsync(token);
-        await process.WaitForExitAsync(token);
-        if (process.ExitCode != 0 && !string.IsNullOrWhiteSpace(error)) throw new InvalidOperationException(error.Trim());
+        var outputTask = process.StandardOutput.ReadToEndAsync(token);
+        var errorTask = process.StandardError.ReadToEndAsync(token);
+        try { await process.WaitForExitAsync(token); }
+        catch (OperationCanceledException)
+        {
+            try { if (!process.HasExited) process.Kill(entireProcessTree: true); } catch { }
+            throw;
+        }
+        var output = await outputTask;
+        var error = await errorTask;
+        if (process.ExitCode != 0) throw new InvalidOperationException(string.IsNullOrWhiteSpace(error)
+            ? $"{Path.GetFileName(file)} exited with code {process.ExitCode}." : error.Trim());
         return output;
     }
 }

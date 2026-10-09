@@ -35,6 +35,12 @@ public partial class App : System.Windows.Application
         }
         _activationRegistration = ThreadPool.RegisterWaitForSingleObject(_activationEvent, (_, _) =>
             Dispatcher.BeginInvoke(RestoreWindow), null, Timeout.Infinite, executeOnlyOnce: false);
+        if (e.Args.Contains("--routes-smoke", StringComparer.OrdinalIgnoreCase))
+        {
+            try { WindowsRouteTable.SmokeTest(); AppLog.Write("Native route smoke test passed."); Shutdown(0); }
+            catch (Exception error) { AppLog.Write($"Native route smoke test failed: {error}"); Shutdown(1); }
+            return;
+        }
         if (e.Args.Contains("--wintun-smoke", StringComparer.OrdinalIgnoreCase))
         {
             try

@@ -15,9 +15,16 @@ public sealed record BondingPathSample(
 public sealed class AdaptiveBondingScheduler
 {
     private readonly Dictionary<string, double> _virtualFinishMs = [];
+    private readonly object _gate = new();
 
     public string? SelectPath(IReadOnlyCollection<BondingPathSample> paths, int packetBytes, BondingMode mode,
         string? preferredPathId = null)
+    {
+        lock (_gate) return SelectPathCore(paths, packetBytes, mode, preferredPathId);
+    }
+
+    private string? SelectPathCore(IReadOnlyCollection<BondingPathSample> paths, int packetBytes, BondingMode mode,
+        string? preferredPathId)
     {
         var healthy = paths.Where(IsUsable).ToList();
         if (healthy.Count == 0) return null;
@@ -37,7 +44,7 @@ public sealed class AdaptiveBondingScheduler
         return selected.PathId;
     }
 
-    public void Forget(string pathId) => _virtualFinishMs.Remove(pathId);
+    public void Forget(string pathId) { lock (_gate) _virtualFinishMs.Remove(pathId); }
 
     private double PredictedArrival(BondingPathSample path, int packetBytes)
     {
@@ -75,6 +82,8 @@ public sealed class PacketReorderBuffer(TimeSpan maximumHold, int maximumPackets
         return Drain(now);
     }
 
+    public IReadOnlyList<ReadOnlyMemory<byte>> Flush(DateTimeOffset now) => Drain(now);
+
     private IReadOnlyList<ReadOnlyMemory<byte>> Drain(DateTimeOffset now)
     {
         var output = new List<ReadOnlyMemory<byte>>();
@@ -88,7 +97,7 @@ public sealed class PacketReorderBuffer(TimeSpan maximumHold, int maximumPackets
             }
 
             var first = _packets.First();
-            var expired = now - first.Value.ReceivedAt >= maximumHold;
+            var expired = now - _packets.Values.Min(x => x.ReceivedAt) >= maximumHold;
             if (!expired && _packets.Count < maximumPackets) break;
             _nextSequence = first.Key;
         }

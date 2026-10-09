@@ -12,6 +12,7 @@ internal sealed class BondingEngine : IAsyncDisposable
     private readonly CancellationTokenSource _shutdown = new();
     private Task? _captureTask;
     private Task? _probeTask;
+    private DateTimeOffset _lastBackpressureLog;
 
     public BondingMode Mode { get; set; } = BondingMode.Bonding;
 
@@ -29,7 +30,11 @@ internal sealed class BondingEngine : IAsyncDisposable
         _client = new DualPathBondingClient(paths, new IPEndPoint(relayAddress, relayPort), key);
         _client.PacketReceived += packet =>
         {
-            _tun.Send(packet.Span);
+            if (!_tun.TrySend(packet.Span) && DateTimeOffset.UtcNow - _lastBackpressureLog >= TimeSpan.FromSeconds(1))
+            {
+                _lastBackpressureLog = DateTimeOffset.UtcNow;
+                AppLog.Write("Wintun receive ring backpressure: dropped packet; relay receiver remains running.");
+            }
             return ValueTask.CompletedTask;
         };
     }

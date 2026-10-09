@@ -1,6 +1,7 @@
 using System.IO;
 using System.Net;
 using System.Text.RegularExpressions;
+using DualLink.Core;
 
 namespace DualLink.App;
 
@@ -21,23 +22,14 @@ public sealed class WireGuardConfigService
         var endpoint = IPAddress.TryParse(host, out var parsed)
             ? parsed
             : (await Dns.GetHostAddressesAsync(host)).FirstOrDefault(x => x.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork);
-        if (endpoint is null)
+        if (endpoint is null || endpoint.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork)
             throw new InvalidOperationException("The Proton WireGuard endpoint could not be resolved to IPv4.");
 
         var port = ExtractPort(endpointValue);
         if (port is null)
             throw new InvalidOperationException("The Proton WireGuard endpoint has no valid UDP port.");
 
-        var prepared = Regex.Replace(content, @"(?mi)^\s*AllowedIPs\s*=.*$",
-            "AllowedIPs = 0.0.0.0/1, 128.0.0.0/1, ::/1, 8000::/1");
-        if (prepared == content)
-            throw new InvalidOperationException("The selected file has no AllowedIPs entry.");
-
-        prepared = Regex.Replace(prepared, @"(?mi)^\s*Endpoint\s*=.*$", $"Endpoint = {endpoint}:{port}");
-        if (Regex.IsMatch(prepared, @"(?mi)^\s*PersistentKeepalive\s*="))
-            prepared = Regex.Replace(prepared, @"(?mi)^\s*PersistentKeepalive\s*=.*$", "PersistentKeepalive = 2");
-        else
-            prepared = Regex.Replace(prepared, @"(?mi)^(\s*Endpoint\s*=.*)$", "$1\r\nPersistentKeepalive = 2");
+        var prepared = WireGuardConfigRewriter.Prepare(content, endpoint, port.Value);
 
         var directory = Path.GetDirectoryName(sourcePath) ?? Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
         var outputPath = Path.Combine(directory, $"{Path.GetFileNameWithoutExtension(sourcePath)}-DualLink.conf");

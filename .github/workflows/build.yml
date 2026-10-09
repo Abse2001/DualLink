@@ -39,6 +39,15 @@ jobs:
           if (-not $dll -or -not $license) { throw 'Official Wintun package layout is invalid' }
           Copy-Item $dll.FullName publish/wintun.dll
           Copy-Item $license.FullName publish/wintun-license.txt
+      - name: Smoke-test native Windows route operations
+        shell: pwsh
+        run: |
+          $process = Start-Process ./publish/LinkWeaver.exe -ArgumentList '--routes-smoke' -Wait -PassThru
+          if ($process.ExitCode -ne 0) {
+            $log = Join-Path $env:LOCALAPPDATA 'DualLink/duallink.log'
+            if (Test-Path $log) { Get-Content $log }
+            throw "Native routing smoke test failed with exit code $($process.ExitCode)"
+          }
       - name: Smoke-test Wintun adapter
         shell: pwsh
         run: |
@@ -184,11 +193,11 @@ jobs:
       - name: Verify release tag matches application version
         shell: bash
         run: |
-          test "${GITHUB_REF_NAME}" = "v2.2.19"
+          test "${GITHUB_REF_NAME}" = "v2.3.0"
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          name: "LinkWeaver 2.2.19 — Reliable WireGuard Handoff Verification"
+          name: "LinkWeaver 2.3.0 — Consistent Network Recovery"
           files: |
             artifacts/LinkWeaver-Setup-x64.exe
             artifacts/DualLink-Relay-linux-x64.zip

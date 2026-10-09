@@ -39,9 +39,12 @@ The Windows workflow runs:
 ```powershell
 publish\LinkWeaver.exe --wintun-smoke
 publish\LinkWeaver.exe --ui-smoke
+publish\LinkWeaver.exe --routes-smoke
 ```
 
 The Linux workflow runs the relay's `--tun-smoke` path when `/dev/net/tun` is available. It proves the separate TUN read/write descriptors work concurrently and verifies network configuration.
+
+The route smoke test creates, updates, looks up and removes an IPv4 host route to benchmark-only `198.18.0.254`. It round-trips the interface automatic-metric policy and restores it in a `finally` block. `RecoveryRegressionTests` also includes an encrypted UDP relay loopback test with ten remove/recreate cycles and a 100-cycle preferred-path recovery scenario. See [the connectivity audit](CONNECTIVITY-AUDIT.md) for the hardware validation limits.
 
 ## Release process
 

@@ -76,13 +76,19 @@ internal sealed class WintunDevice : IDisposable
         }
     }
 
-    public void Send(ReadOnlySpan<byte> packet)
+    public bool TrySend(ReadOnlySpan<byte> packet)
     {
         var destination = _allocateSendPacket(_session, checked((uint)packet.Length));
-        if (destination == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error(), "Wintun send ring is full");
+        if (destination == IntPtr.Zero)
+        {
+            var error = Marshal.GetLastWin32Error();
+            if (error == 111) return false; // Ring backpressure drops a packet, not the receiver loop.
+            throw new Win32Exception(error, "Unable to allocate a Wintun packet");
+        }
         var managed = packet.ToArray();
         Marshal.Copy(managed, 0, destination, managed.Length);
         _sendPacket(_session, destination);
+        return true;
     }
 
     public void Dispose()

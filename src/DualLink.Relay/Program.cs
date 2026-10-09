@@ -35,11 +35,14 @@ await RelayNetwork.ConfigureAsync(shutdown.Token);
 using var udp = new UdpClient(new IPEndPoint(IPAddress.Any, port));
 var peers = new ConcurrentDictionary<(ulong Session, byte Path), Peer>();
 var replays = new ConcurrentDictionary<ulong, ReplayWindow>();
+var pathReplays = new ConcurrentDictionary<(ulong Session, byte Path), ReplayWindow>();
 var reorder = new ConcurrentDictionary<ulong, PacketReorderBuffer>();
 long outboundSequence = 0;
 var pathPacketCounts = new ConcurrentDictionary<(ulong Session, byte Path), int>();
 var sessionControls = new ConcurrentDictionary<ulong, BondingControl>();
+var controlSequences = new ConcurrentDictionary<ulong, ulong>();
 var downlinkSchedulers = new ConcurrentDictionary<ulong, AdaptiveBondingScheduler>();
+using var deliveryGate = new SemaphoreSlim(1, 1);
 // Client probes arrive every 150 ms.  A physical link can remain electrically
 // connected while its ISP is dead, so endpoint liveness—not NIC link state—is
 // authoritative.  Five missed probes gives jitter tolerance without leaving
@@ -60,19 +63,36 @@ var receiveTask = Task.Run(async () =>
 
         if (!BondingPacketCodec.TryDecode(datagram.Buffer, key, out var packet) || packet is null) continue;
         if (packet.Direction != BondingDirection.Uplink) continue;
+        var pathReplay = pathReplays.GetOrAdd((packet.SessionId, packet.PathId), _ => new ReplayWindow());
+        if (!pathReplay.TryAccept(packet.Sequence)) continue;
         var replay = replays.GetOrAdd(packet.SessionId, _ => new ReplayWindow());
+        // Even a duplicate proves this path's authenticated NAT endpoint is alive.
+        // In Redundant mode, rejecting duplicates before this update made the
+        // slower adapter disappear from downlink despite continuously receiving.
+        peers[(packet.SessionId, packet.PathId)] = new Peer(datagram.RemoteEndPoint, DateTimeOffset.UtcNow);
         if (!replay.TryAccept(packet.Sequence)) continue;
 
-        peers[(packet.SessionId, packet.PathId)] = new Peer(datagram.RemoteEndPoint, DateTimeOffset.UtcNow);
-        if (packet.Kind == BondingPacketKind.Control && BondingControlCodec.TryDecode(packet.Payload.Span, out var control) && control is not null)
+        if (packet.Kind == BondingPacketKind.Control && packet.Sequence > controlSequences.GetValueOrDefault(packet.SessionId) &&
+            BondingControlCodec.TryDecode(packet.Payload.Span, out var control) && control is not null)
+        {
             sessionControls[packet.SessionId] = control;
-        var orderBuffer = reorder.GetOrAdd(packet.SessionId, _ => new PacketReorderBuffer(TimeSpan.FromMilliseconds(150)));
-        var ordered = orderBuffer.Add(
-            packet.Sequence,
-            packet.Kind == BondingPacketKind.Data ? packet.Payload : ReadOnlyMemory<byte>.Empty,
-            DateTimeOffset.UtcNow);
-        foreach (var innerPacket in ordered)
-            if (!innerPacket.IsEmpty) await tun.WriteAsync(innerPacket, shutdown.Token);
+            controlSequences[packet.SessionId] = packet.Sequence;
+        }
+        var orderBuffer = reorder.GetOrAdd(packet.SessionId, _ => new PacketReorderBuffer(TimeSpan.FromMilliseconds(25)));
+        await deliveryGate.WaitAsync(shutdown.Token);
+        try
+        {
+            sessionControls.TryGetValue(packet.SessionId, out var currentControl);
+            var ordered = currentControl?.Mode == BondingMode.Redundant
+                ? new[] { packet.Kind == BondingPacketKind.Data ? packet.Payload : ReadOnlyMemory<byte>.Empty }
+                : orderBuffer.Add(
+                    packet.Sequence,
+                    packet.Kind == BondingPacketKind.Data ? packet.Payload : ReadOnlyMemory<byte>.Empty,
+                    DateTimeOffset.UtcNow);
+            foreach (var innerPacket in ordered)
+                if (!innerPacket.IsEmpty) await tun.WriteAsync(innerPacket, shutdown.Token);
+        }
+        finally { deliveryGate.Release(); }
 
         if (packet.Kind == BondingPacketKind.Probe)
         {
@@ -162,6 +182,22 @@ var transmitTask = Task.Run(async () =>
     }
 }, shutdown.Token);
 
-await Task.WhenAll(receiveTask, transmitTask);
+var flushTask = Task.Run(async () =>
+{
+    using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(25));
+    while (await timer.WaitForNextTickAsync(shutdown.Token))
+    {
+        await deliveryGate.WaitAsync(shutdown.Token);
+        try
+        {
+            foreach (var buffer in reorder.Values)
+                foreach (var packet in buffer.Flush(DateTimeOffset.UtcNow))
+                    if (!packet.IsEmpty) await tun.WriteAsync(packet, shutdown.Token);
+        }
+        finally { deliveryGate.Release(); }
+    }
+}, shutdown.Token);
+
+await Task.WhenAll(receiveTask, transmitTask, flushTask);
 
 internal sealed record Peer(IPEndPoint EndPoint, DateTimeOffset LastSeen);

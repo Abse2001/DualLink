@@ -24,9 +24,9 @@ public sealed class BondingPathTransport : IAsyncDisposable
             throw new ArgumentException("Local adapter and relay address families must match.", nameof(config));
 
         _socket = new Socket(relay.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
-        if (relay.AddressFamily == AddressFamily.InterNetwork)
+        if (OperatingSystem.IsWindows() && relay.AddressFamily == AddressFamily.InterNetwork)
             _socket.SetSocketOption(SocketOptionLevel.IP, (SocketOptionName)31, IPAddress.HostToNetworkOrder(config.InterfaceIndex));
-        else
+        else if (OperatingSystem.IsWindows())
             _socket.SetSocketOption(SocketOptionLevel.IPv6, (SocketOptionName)31, config.InterfaceIndex);
         _socket.Bind(new IPEndPoint(config.LocalAddress, 0));
         _socket.Connect(relay);
@@ -64,14 +64,18 @@ public sealed class DualPathBondingClient : IAsyncDisposable
     private readonly IPEndPoint _relay;
     private readonly AdaptiveBondingScheduler _scheduler = new();
     private readonly ReplayWindow _downlinkReplay = new();
-    private readonly PacketReorderBuffer _downlinkOrder = new(TimeSpan.FromMilliseconds(150));
+    private readonly PacketReorderBuffer _downlinkOrder = new(TimeSpan.FromMilliseconds(25));
+    private readonly SemaphoreSlim _deliveryGate = new(1, 1);
+    private BondingMode _mode;
     private readonly CancellationTokenSource _shutdown = new();
     private readonly List<Task> _receiveTasks = [];
     private long _nextSequence;
-    private readonly ConcurrentDictionary<ulong, SentPacket> _sentPackets = new();
-    private readonly ConcurrentDictionary<byte, PathTelemetry> _telemetry = new();
+    private readonly ConcurrentDictionary<(ulong Sequence, byte Path), SentPacket> _sentPackets = new();
+    private readonly ConcurrentDictionary<BondingPathTransport, PathTelemetry> _telemetry = new();
     private readonly ConcurrentDictionary<byte, DateTimeOffset> _pathAddedAt = new();
     private readonly object _taskLock = new();
+    private DateTimeOffset _lastLostPacketSweep;
+    private int _trackedPackets;
     private readonly TaskCompletionSource _relayReady = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     public event Func<ReadOnlyMemory<byte>, ValueTask>? PacketReceived;
@@ -94,6 +98,7 @@ public sealed class DualPathBondingClient : IAsyncDisposable
     {
         if (_receiveTasks.Count != 0) return;
         foreach (var path in _paths.Values) StartReceiver(path);
+        lock (_taskLock) _receiveTasks.Add(Task.Run(FlushLoopAsync));
     }
 
     public async ValueTask<string?> SendPacketAsync(
@@ -103,6 +108,7 @@ public sealed class DualPathBondingClient : IAsyncDisposable
         string? preferredPathName,
         CancellationToken token)
     {
+        _mode = mode;
         if (mode == BondingMode.Redundant)
         {
             var healthy = samples.Where(sample => sample.Online && _paths.ContainsKey(sample.PathId)).ToArray();
@@ -110,7 +116,7 @@ public sealed class DualPathBondingClient : IAsyncDisposable
             var duplicateSequence = NextSequence();
             foreach (var sample in healthy)
             {
-                var duplicatePath = _paths[sample.PathId];
+                if (!_paths.TryGetValue(sample.PathId, out var duplicatePath)) continue;
                 var duplicate = BondingPacketCodec.Encode(new BondingPacket(
                     BondingPacketKind.Data,
                     duplicatePath.Config.PathId,
@@ -126,7 +132,7 @@ public sealed class DualPathBondingClient : IAsyncDisposable
                 }
                 catch (Exception error) when (error is SocketException or ObjectDisposedException)
                 {
-                    MarkPathFailed(duplicatePath.Config.PathId);
+                    MarkPathFailed(duplicatePath);
                 }
             }
             return string.Join(" + ", healthy.Select(sample => sample.PathId));
@@ -151,7 +157,7 @@ public sealed class DualPathBondingClient : IAsyncDisposable
         }
         catch (Exception error) when (error is SocketException or ObjectDisposedException)
         {
-            MarkPathFailed(path.Config.PathId);
+            MarkPathFailed(path);
             var fallbackName = _scheduler.SelectPath(GetAdaptiveSamples(samples), innerPacket.Length, mode, preferredPathName);
             if (fallbackName is null || fallbackName == pathName || !_paths.TryGetValue(fallbackName, out var fallback)) return null;
             var retry = BondingPacketCodec.Encode(new BondingPacket(
@@ -165,7 +171,7 @@ public sealed class DualPathBondingClient : IAsyncDisposable
             }
             catch (Exception retryError) when (retryError is SocketException or ObjectDisposedException)
             {
-                MarkPathFailed(fallback.Config.PathId);
+                MarkPathFailed(fallback);
                 return null;
             }
         }
@@ -185,7 +191,7 @@ public sealed class DualPathBondingClient : IAsyncDisposable
             }
             catch (Exception error) when (error is SocketException or ObjectDisposedException)
             {
-                MarkPathFailed(path.Config.PathId);
+                MarkPathFailed(path);
             }
         }
     }
@@ -218,7 +224,7 @@ public sealed class DualPathBondingClient : IAsyncDisposable
             try { await path.SendAsync(frame, token); }
             catch (Exception error) when (error is SocketException or ObjectDisposedException)
             {
-                MarkPathFailed(path.Config.PathId);
+                MarkPathFailed(path);
             }
         }
     }
@@ -245,41 +251,62 @@ public sealed class DualPathBondingClient : IAsyncDisposable
             catch (ObjectDisposedException) { break; }
             catch (SocketException)
             {
-                MarkPathFailed(path.Config.PathId);
-                _paths.TryRemove(path.Config.PathName, out _);
+                // An old receiver may finish after reconnection already installed
+                // a replacement socket. Never remove that new transport by name.
+                ((ICollection<KeyValuePair<string, BondingPathTransport>>)_paths).Remove(new(path.Config.PathName, path));
                 await path.DisposeAsync();
                 break;
             }
 
             if (!BondingPacketCodec.TryDecode(buffer.AsSpan(0, length), _key, out var packet) || packet is null) continue;
-            if (packet.Direction != BondingDirection.Downlink || packet.SessionId != _sessionId) continue;
+            if (packet.Direction != BondingDirection.Downlink || packet.SessionId != _sessionId || packet.PathId != path.Config.PathId) continue;
+            if (!_paths.TryGetValue(path.Config.PathName, out var current) || !ReferenceEquals(current, path)) continue;
             if (packet.Kind == BondingPacketKind.ProbeReply && packet.Payload.Length == sizeof(long))
             {
                 _relayReady.TrySetResult();
                 var sentAt = DateTimeOffset.FromUnixTimeMilliseconds(BitConverter.ToInt64(packet.Payload.Span));
                 var now = DateTimeOffset.UtcNow;
                 var rtt = Math.Max(0.1, (now - sentAt).TotalMilliseconds);
-                _telemetry.AddOrUpdate(packet.PathId,
+                _telemetry.AddOrUpdate(path,
                     _ => new PathTelemetry(rtt, 0, 10, 1, now),
-                    (_, old) => old with { RttMs = Ewma(old.RttMs, rtt), LastReplyAt = now, Reliability = Math.Min(1, old.Reliability + .05) });
+                    (_, old) => old with { RttMs = Ewma(old.RttMs, rtt), LastReplyAt = now,
+                        LossPercent = Ewma(old.LossPercent, 0), Reliability = Math.Max(.5, Math.Min(1, old.Reliability + .05)) });
             }
             else if (packet.Kind == BondingPacketKind.Ack)
             {
-                ApplyAcknowledgement(packet.PathId, packet.Acknowledgement);
+                ApplyAcknowledgement(path, packet.Acknowledgement);
             }
-            IReadOnlyList<ReadOnlyMemory<byte>> ordered;
-            lock (_downlinkReplay)
+            await _deliveryGate.WaitAsync(token);
+            try
             {
                 if (!_downlinkReplay.TryAccept(packet.Sequence)) continue;
-                ordered = _downlinkOrder.Add(
+                var ordered = _mode == BondingMode.Redundant
+                    ? new[] { packet.Kind == BondingPacketKind.Data ? packet.Payload : ReadOnlyMemory<byte>.Empty }
+                    : _downlinkOrder.Add(
                     packet.Sequence,
                     packet.Kind == BondingPacketKind.Data ? packet.Payload : ReadOnlyMemory<byte>.Empty,
                     DateTimeOffset.UtcNow);
+                if (PacketReceived is { } callback)
+                    foreach (var innerPacket in ordered)
+                        if (!innerPacket.IsEmpty) await callback(innerPacket);
             }
+            finally { _deliveryGate.Release(); }
+        }
+    }
 
-            if (PacketReceived is { } callback)
-                foreach (var innerPacket in ordered)
-                    if (!innerPacket.IsEmpty) await callback(innerPacket);
+    private async Task FlushLoopAsync()
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(25));
+        while (await timer.WaitForNextTickAsync(_shutdown.Token))
+        {
+            await _deliveryGate.WaitAsync(_shutdown.Token);
+            try
+            {
+                if (PacketReceived is { } callback)
+                    foreach (var packet in _downlinkOrder.Flush(DateTimeOffset.UtcNow))
+                        if (!packet.IsEmpty) await callback(packet);
+            }
+            finally { _deliveryGate.Release(); }
         }
     }
 
@@ -291,7 +318,7 @@ public sealed class DualPathBondingClient : IAsyncDisposable
         return baseline.Select(sample =>
         {
             if (!_paths.TryGetValue(sample.PathId, out var path)) return sample with { Online = false, LossPercent = 100, Reliability = 0 };
-            if (!_telemetry.TryGetValue(path.Config.PathId, out var measured))
+            if (!_telemetry.TryGetValue(path, out var measured))
             {
                 var awaitingFirstReply = !_pathAddedAt.TryGetValue(path.Config.PathId, out var addedAt) ||
                     DateTimeOffset.UtcNow - addedAt <= PathReplyTimeout;
@@ -300,11 +327,13 @@ public sealed class DualPathBondingClient : IAsyncDisposable
             var replyTimedOut = DateTimeOffset.UtcNow - measured.LastReplyAt > PathReplyTimeout;
             return sample with
             {
-                Online = sample.Online && !replyTimedOut,
+                // An authenticated reply is stronger evidence than a third-party
+                // TCP probe that may be filtered by this ISP.
+                Online = !replyTimedOut,
                 SmoothedRttMs = measured.RttMs > 0 ? measured.RttMs : sample.SmoothedRttMs,
-                LossPercent = replyTimedOut ? 100 : Math.Max(sample.LossPercent, measured.LossPercent),
+                LossPercent = replyTimedOut ? 100 : measured.LossPercent,
                 DeliveryRateMbps = measured.DeliveryRateMbps > 0 ? measured.DeliveryRateMbps : sample.DeliveryRateMbps,
-                Reliability = replyTimedOut ? 0 : Math.Min(sample.Reliability, measured.Reliability)
+                Reliability = replyTimedOut ? 0 : measured.Reliability
             };
         }).ToArray();
     }
@@ -320,7 +349,8 @@ public sealed class DualPathBondingClient : IAsyncDisposable
             if (_paths.TryRemove(existing.Key, out var removed))
             {
                 _pathAddedAt.TryRemove(removed.Config.PathId, out _);
-                _telemetry.TryRemove(removed.Config.PathId, out _);
+                _telemetry.TryRemove(removed, out _);
+                _scheduler.Forget(removed.Config.PathName);
                 await removed.DisposeAsync();
             }
         }
@@ -340,34 +370,57 @@ public sealed class DualPathBondingClient : IAsyncDisposable
     private void StartReceiver(BondingPathTransport path)
     {
         var task = Task.Run(() => ReceiveLoopAsync(path, _shutdown.Token));
-        lock (_taskLock) _receiveTasks.Add(task);
+        lock (_taskLock)
+        {
+            _receiveTasks.RemoveAll(x => x.IsCompleted);
+            _receiveTasks.Add(task);
+        }
     }
 
-    private void RecordSent(ulong sequence, BondingPathTransport path, int bytes) =>
-        _sentPackets[sequence] = new(path.Config.PathId, bytes, DateTimeOffset.UtcNow);
+    private void RecordSent(ulong sequence, BondingPathTransport path, int bytes)
+    {
+        // Bound telemetry memory during a high-throughput outage. Forwarding does
+        // not depend on these diagnostic acknowledgement samples.
+        if (Interlocked.Increment(ref _trackedPackets) > 32768)
+        {
+            Interlocked.Decrement(ref _trackedPackets);
+            return;
+        }
+        if (!_sentPackets.TryAdd((sequence, path.Config.PathId), new(path, bytes, DateTimeOffset.UtcNow)))
+            Interlocked.Decrement(ref _trackedPackets);
+    }
 
-    private void ApplyAcknowledgement(byte pathId, ulong acknowledgement)
+    private void ApplyAcknowledgement(BondingPathTransport path, ulong acknowledgement)
     {
         var now = DateTimeOffset.UtcNow;
-        var acknowledged = _sentPackets.Where(item => item.Value.PathId == pathId && item.Key <= acknowledgement).ToArray();
+        var acknowledged = _sentPackets.Where(item => ReferenceEquals(item.Value.Transport, path) && item.Key.Sequence <= acknowledgement).ToArray();
         if (acknowledged.Length == 0) return;
-        foreach (var item in acknowledged) _sentPackets.TryRemove(item.Key, out _);
+        foreach (var item in acknowledged)
+            if (_sentPackets.TryRemove(item.Key, out _)) Interlocked.Decrement(ref _trackedPackets);
         var first = acknowledged.Min(item => item.Value.SentAt);
         var duration = Math.Max(0.001, (now - first).TotalSeconds);
         var rate = acknowledged.Sum(item => item.Value.Bytes) * 8d / duration / 1_000_000d;
-        var ackRtt = Math.Max(0.1, (now - acknowledged.MaxBy(item => item.Key).Value.SentAt).TotalMilliseconds);
-        _telemetry.AddOrUpdate(pathId,
+        var ackRtt = Math.Max(0.1, (now - acknowledged.MaxBy(item => item.Key.Sequence).Value.SentAt).TotalMilliseconds);
+        _telemetry.AddOrUpdate(path,
             _ => new PathTelemetry(ackRtt, 0, rate, 1, now),
             (_, old) => old with { RttMs = Ewma(old.RttMs, ackRtt), DeliveryRateMbps = Ewma(old.DeliveryRateMbps, rate), Reliability = Math.Min(1, old.Reliability + .02), LastReplyAt = now });
     }
 
     private void ExpireLostPackets()
     {
-        var cutoff = DateTimeOffset.UtcNow - TimeSpan.FromSeconds(3);
+        var now = DateTimeOffset.UtcNow;
+        lock (_taskLock)
+        {
+            if (now - _lastLostPacketSweep < TimeSpan.FromMilliseconds(100)) return;
+            _lastLostPacketSweep = now;
+        }
+        var cutoff = now - TimeSpan.FromSeconds(3);
         foreach (var item in _sentPackets.Where(item => item.Value.SentAt < cutoff).ToArray())
         {
             if (!_sentPackets.TryRemove(item.Key, out var lost)) continue;
-            _telemetry.AddOrUpdate(lost.PathId,
+            Interlocked.Decrement(ref _trackedPackets);
+            if (!_paths.TryGetValue(lost.Transport.Config.PathName, out var current) || !ReferenceEquals(current, lost.Transport)) continue;
+            _telemetry.AddOrUpdate(lost.Transport,
                 _ => new PathTelemetry(0, 5, 1, .9, DateTimeOffset.MinValue),
                 (_, old) => old with { LossPercent = Math.Min(100, Ewma(old.LossPercent, 5)), Reliability = Math.Max(.05, old.Reliability * .95) });
         }
@@ -375,10 +428,13 @@ public sealed class DualPathBondingClient : IAsyncDisposable
 
     private static double Ewma(double previous, double sample) => previous <= 0 ? sample : previous * .8 + sample * .2;
 
-    private void MarkPathFailed(byte pathId) =>
-        _telemetry.AddOrUpdate(pathId,
+    private void MarkPathFailed(BondingPathTransport path)
+    {
+        if (!_paths.TryGetValue(path.Config.PathName, out var current) || !ReferenceEquals(current, path)) return;
+        _telemetry.AddOrUpdate(path,
             _ => new PathTelemetry(0, 100, 1, 0, DateTimeOffset.MinValue),
             (_, old) => old with { LossPercent = 100, Reliability = 0, LastReplyAt = DateTimeOffset.MinValue });
+    }
 
     public async ValueTask DisposeAsync()
     {
@@ -392,6 +448,6 @@ public sealed class DualPathBondingClient : IAsyncDisposable
         CryptographicOperations.ZeroMemory(_key);
     }
 
-    private sealed record SentPacket(byte PathId, int Bytes, DateTimeOffset SentAt);
+    private sealed record SentPacket(BondingPathTransport Transport, int Bytes, DateTimeOffset SentAt);
     private sealed record PathTelemetry(double RttMs, double LossPercent, double DeliveryRateMbps, double Reliability, DateTimeOffset LastReplyAt);
 }

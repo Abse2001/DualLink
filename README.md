@@ -15,38 +15,19 @@ LinkWeaver is a free Windows 11 multipath tunnel that bonds Ethernet, Wi-Fi hots
 | [Development and releases](docs/DEVELOPMENT.md) | Build, test, package, sign, and publish LinkWeaver. |
 | [Security policy](SECURITY.md) | Trust model, credential handling, release verification, and vulnerability reports. |
 
-## Connectivity forensics and stable paths — 2.2.11
+## Consistent network recovery — 2.3.0
 
-LinkWeaver 2.2.19 fixes a WireGuard handoff verification collision that could leave failover stuck after a physical Ethernet disconnect. Physical adapter probes and tunnel verification now use separate destinations, and an endpoint route that has already moved to Wi-Fi is no longer deleted and recreated on every verification retry. The dashboard reports the adapter actually carrying the WireGuard endpoint while end-to-end verification completes. The tunnel stays running, so the VPN server and public IP remain unchanged.
+LinkWeaver 2.3.0 replaces PowerShell route changes in the monitoring loop with native Windows IP Helper calls. Existing host routes are updated in place, and the route Windows actually chooses is verified. WireGuard remains running throughout a handoff.
 
-The manually selected preferred adapter remains authoritative in tunnel Failover mode for both uplink and relay downlink traffic. LinkWeaver recreates physical probe routes after a link down/up transition and forces WireGuard's endpoint route off the temporary backup when the preferred adapter recovers. The preferred label does not move to a temporary backup; the Role column distinguishes configured preference from current activity. Backup adapters still exchange small health/control probes, while Bonding mode intentionally uses every healthy path.
+Each adapter tests independent Cloudflare and Google HTTPS destinations. The first success finishes the round, while the timeout adapts to the adapter's latency. Physical-change notifications cancel obsolete samples; new IPv4 addresses, gateways and interface indices clear old health. A failed carrying path is handled before waiting for standby probes. Ethernet preference returns after one second of confirmed recovery rather than flapping back on a single good sample.
 
-Selectable Aggressive, Fast, Balanced, and Stable response profiles control confirmation for Internet-only fluctuations while keeping physical disconnect response immediate. A WireGuard path is no longer reported as switched unless end-to-end tunnel Internet is verified; failed recovery attempts retain the last verified path and retry.
+Tunnel verification runs separately and binds to the tunnel interface. It cannot accidentally pass through a physical probe route or block another failover. The UI distinguishes routed and verified paths, uses authenticated relay replies as authoritative relay health, and retains preferences across restart.
 
-LinkWeaver 2.2.11 treats end-to-end reachability as authoritative when a cable
-remains connected but its upstream Internet service fails. Physical probes run
-concurrently using a persistent, unique target per adapter, preventing probe host-route
-races, stale routes after reconnection, and false Offline/online flicker. Failed
-route verification is retried until the chosen and verified paths agree. Direct-mode route changes are verified
-through the selected interface, and stale relay paths expire after 750 ms. Every
-actual WireGuard path change validates and moves the endpoint route while keeping
-the active tunnel service alive. LinkWeaver no longer restarts WireGuard during
-failover, avoiding a deliberate tunnel teardown that can end game sessions.
+The relay path fixes repeated socket reconnects, stale failed-path quality, redundant-path liveness and packets stuck indefinitely in reorder buffers. Redundant mode forwards the first authenticated packet copy immediately; other modes flush reorder gaps after 25 ms. Logging rotates and history/chart work is throttled.
 
-Bonding path numbers are now stable for each Windows adapter, so removing Ethernet
-does not renumber or recreate the surviving Wi-Fi/USB path. History and CSV exports
-record the physical link state, IPv4 and gateway availability, upstream reachability,
-active path, WireGuard and bonding state, local/public IP changes, probe errors,
-throughput, latency, and outage duration.
+Read the [complete connectivity audit and test breakdown](docs/CONNECTIVITY-AUDIT.md). For timestamped end-to-end loss and public-IP observations, run [Test-Continuity.ps1](scripts/Test-Continuity.ps1).
 
-Adapter health uses interface-bound TCP handshakes instead of ICMP-only ping. This
-prevents Ethernet from being marked Offline when a router, ISP, or VPN path blocks
-ICMP while ordinary Internet traffic is still passing. Missing adapter identities
-are retained for diagnosis and automatic recovery. Two attempts run concurrently
-on every 75 ms monitoring cycle with a 225 ms deadline; if both fail, an upstream-only outage is acted
-on in that same cycle even while Windows still reports the physical link as Up.
-
-Tunnel paths are health-probed every 150 ms. Four missed replies mark a path unavailable in about 600 ms, and a packet that encounters a socket failure is retried immediately on the healthiest remaining path. Windows adapter-change notifications wake direct failover immediately, with a 250 ms verification cadence for upstream failures. Recovered paths are probed and automatically rejoined.
+Direct WireGuard failover has a detection and roaming interval. Stable VPN IP alone cannot guarantee no lost packets or no GTA session disconnect. For continuity through one-path failure without waiting for detection, the existing relay **Redundant** mode copies traffic continuously over independent links and keeps one VPS exit IP; it uses roughly twice the data on two paths. Use one exit tunnel for a session and keep the backup connected.
 
 ## Bonding mode
 
