@@ -180,7 +180,7 @@ jobs:
           path: relay-package/
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v') || (github.ref == 'refs/heads/main' && github.event.head_commit.message == 'Release LinkWeaver 2.3.0')
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: [build, relay]
     runs-on: ubuntu-latest
     permissions:
@@ -193,11 +193,10 @@ jobs:
       - name: Verify release tag matches application version
         shell: bash
         run: |
-          test "${GITHUB_REF_NAME}" = "v2.3.0" || test "${GITHUB_REF_NAME}" = "main"
+          test "${GITHUB_REF_NAME}" = "v2.3.0"
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.3.0
           name: "LinkWeaver 2.3.0 — Consistent Network Recovery"
           body: |
             Recovery and continuity fixes for Ethernet, Wi-Fi, WireGuard and the encrypted relay.
