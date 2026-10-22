@@ -42,7 +42,8 @@ Route-table fakes do not reproduce the Windows kernel or a real WireGuard driver
 Use a Windows PC with two independent Internet connections. Run the existing
 `scripts/Test-Continuity.ps1` in another terminal to record timestamps and exit IP.
 Repeat the matrix first with WireGuard inactive, then with the prepared WireGuard
-configuration active and Proton-safe mode enabled. Keep automatic route management
+configuration active. WireGuard is detected automatically, including when an older
+installation saved Proton-safe mode as disabled. Keep automatic route management
 enabled. Adapter enable/disable operations can interrupt remote sessions, so perform
 these checks locally.
 
@@ -56,11 +57,16 @@ these checks locally.
 | Disable Wi-Fi while recovered Ethernet is in cooldown | The only healthy Ethernet connection can be selected immediately. |
 | Prefer Wi-Fi and repeat the failure/recovery sequence | Preference and fallback work in the other direction. |
 | Turn WireGuard on, then off while monitoring | The selected route is reapplied in the new mode; VPN verification is invalidated. |
+| Start WireGuard with an old saved Proton-safe setting disabled | The dashboard shows WireGuard detected and uses endpoint failover, without requiring a checkbox. |
+| Start with no known WireGuard endpoint | Adapter rows remain visible during endpoint discovery; ordinary physical route proof is never used for VPN traffic. |
+| A route update fails | The table continues updating and displays a retry status instead of an empty dashboard. |
 | Repeat failure/recovery at least 20 times | No path remains permanently rejected; routes converge after every recovery. |
 
 Inspect `%LOCALAPPDATA%\DualLink\duallink.log` and the connection history alongside
 the continuity log. A successful endpoint refresh command is followed by fresh
 tunnel verification; the UI must not label an unverified tunnel as verified.
+The window title identifies this follow-up build as **LinkWeaver 2.3.1**. After
+installing, exit any older running tray instance before opening the updated app.
 Direct failover still has detection and roaming delay. These tests do not establish
 zero packet loss or guarantee third-party game/session retention. The app's managed
 underlay selection and these adapter checks concern IPv4 routes.

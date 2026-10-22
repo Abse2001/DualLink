@@ -273,6 +273,10 @@ public sealed class NetworkService
 
     public Task ApplyMetricsAsync(IEnumerable<AdapterInfo> adapters, string preferredId, int preferredMetric, int backupMetric)
     {
+        // WireGuard may start between the monitor's snapshot and this call.
+        // Never try to prove ordinary traffic bypasses a newly active tunnel.
+        if (IsProtonTunnelActive())
+            throw new InvalidOperationException("WireGuard became active; waiting for protected endpoint routing.");
         if (!_physicalRoutes.Apply(adapters.ToArray(), preferredId, preferredMetric, backupMetric,
                 (backup, error) => AppLog.Write($"Standby interface metric for {backup.Name}: {error.Message}")))
             throw new InvalidOperationException("Windows could not apply the selected Internet adapter's route preference.");

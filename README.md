@@ -15,7 +15,9 @@ LinkWeaver is a free Windows 11 multipath tunnel that bonds Ethernet, Wi-Fi hots
 | [Development and releases](docs/DEVELOPMENT.md) | Build, test, package, sign, and publish LinkWeaver. |
 | [Security policy](SECURITY.md) | Trust model, credential handling, release verification, and vulnerability reports. |
 
-## Consistent network recovery — 2.3.0
+## Network recovery — 2.3.1
+
+The 2.3.1 recovery update detects active WireGuard tunnels automatically, including when an older saved Proton-safe setting was disabled. Endpoint discovery and route errors keep adapter monitoring visible. The window title shows the installed version.
 
 LinkWeaver 2.3.0 replaces PowerShell route changes in the monitoring loop with native Windows IP Helper calls. Existing host routes are updated in place, and the route Windows actually chooses is verified. WireGuard remains running throughout a handoff.
 

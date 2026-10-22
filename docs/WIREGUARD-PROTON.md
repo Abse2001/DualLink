@@ -29,9 +29,11 @@ Do not activate a separate full-tunnel Proton configuration while testing LinkWe
 4. Select the newly downloaded `.conf` file.
 5. LinkWeaver creates a separate `-DualLink.conf` file.
 6. Import the generated file into the official WireGuard application and activate that generated tunnel.
-7. Enable **Proton-safe gaming mode** in LinkWeaver.
+7. Keep **Manage routes automatically** enabled. LinkWeaver detects the active WireGuard tunnel automatically; the dashboard shows **WireGuard: detected**. Older saved Proton-safe checkbox settings cannot disable protection.
 
 The generated configuration replaces IPv4/IPv6 default prefixes with two half-default routes. This avoids WireGuard for Windows's special `/0` kill-switch behavior while still routing Internet traffic through Proton. LinkWeaver resolves and stores the endpoint IPv4 address, then maintains explicit `/32` endpoint routes through physical gateways.
+
+In 2.3.1, endpoint discovery can also read the running official WireGuard application's public peer metadata. While discovery is pending, adapter monitoring continues and ordinary physical route changes are paused. A routing error is displayed with the adapter table still visible and is retried automatically. The app does not change the running profile's allowed IPs or firewall policy.
 
 ## Failover behavior in 2.2.10
 
