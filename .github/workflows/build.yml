@@ -22,7 +22,14 @@ jobs:
       - name: Restore
         run: dotnet restore DualLink.sln
       - name: Test
-        run: dotnet test DualLink.sln --configuration Release --no-restore
+        run: dotnet test DualLink.sln --configuration Release --no-restore --logger "trx;LogFileName=windows.trx" --results-directory TestResults
+      - name: Keep Windows test results
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: Windows-test-results
+          path: TestResults/*.trx
+          if-no-files-found: ignore
       - name: Build Windows application
         run: dotnet build src/DualLink.App/DualLink.App.csproj --configuration Release --no-restore
       - name: Publish self-contained app without executable packing
@@ -155,7 +162,14 @@ jobs:
         with:
           dotnet-version: '8.0.x'
       - name: Test shared protocol
-        run: dotnet test tests/DualLink.Tests/DualLink.Tests.csproj -c Release
+        run: dotnet test tests/DualLink.Tests/DualLink.Tests.csproj -c Release --logger "trx;LogFileName=linux.trx" --results-directory TestResults
+      - name: Keep Linux test results
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: Linux-test-results
+          path: TestResults/*.trx
+          if-no-files-found: ignore
       - name: Publish Linux relay
         run: dotnet publish src/DualLink.Relay/DualLink.Relay.csproj -c Release -r linux-x64 --self-contained true -p:PublishSingleFile=true -o relay-package
       - name: Smoke-test Linux TUN relay
@@ -193,13 +207,16 @@ jobs:
       - name: Verify release tag matches application version
         shell: bash
         run: |
-          test "${GITHUB_REF_NAME}" = "v2.3.0"
+          test "${GITHUB_REF_NAME}" = "v2.3.1"
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          name: "LinkWeaver 2.3.0 — Consistent Network Recovery"
+          name: "LinkWeaver 2.3.1 — Automatic WireGuard Recovery"
           body: |
             Recovery and continuity fixes for Ethernet, Wi-Fi, WireGuard and the encrypted relay.
+
+            - Active WireGuard tunnels are detected automatically, including when an older saved Proton-safe setting was off.
+            - Endpoint discovery and route errors keep adapter monitoring visible and retry automatically.
 
             - Independent per-adapter probes with two providers and adaptive deadlines reduce false offline readings.
             - Active-path failure checks no longer wait for slow standby checks or WireGuard verification.
@@ -209,7 +226,7 @@ jobs:
             - Relay reconnects recover from authenticated replies, redundant acknowledgements are tracked per path, and reorder gaps drain on a timer.
             - Preferences persist across restart; diagnostics and history updates are bounded.
 
-            See docs/CONNECTIVITY-AUDIT.md for the component audit, test coverage and limits. The release is gated by 33 tests, Windows native-route/Wintun/UI smoke tests and the Linux relay job.
+            See docs/ADAPTER-RECOVERY-TESTING.md for regression coverage and live adapter checks. The release is gated by the full automated test suite, Windows native-route/Wintun/UI smoke tests and the Linux relay job.
 
             Direct WireGuard failover preserves the VPN exit while changing its physical path, but still requires failure detection and roaming. It cannot guarantee zero packet loss or GTA Online session survival on every network. Relay Redundant mode continuously copies traffic over healthy paths with a stable relay exit IP; choose the tunnel before joining a game.
 

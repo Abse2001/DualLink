@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Net;
 using System.Runtime.InteropServices;
 using System.Net.NetworkInformation;
+using DualLink.Core;
 
 namespace DualLink.App;
 
@@ -69,11 +70,18 @@ internal static class WindowsRouteTable
     }
 
     public static int? BestInterface(IPAddress destination)
+        => BestRoute(destination)?.InterfaceIndex;
+
+    public static WireGuardEndpointRoute? BestRoute(IPAddress destination)
     {
         var address = Address.From(destination);
         return GetBestRoute2(IntPtr.Zero, 0, IntPtr.Zero, ref address, 0, out var row, out _) == 0
-            ? (int)row.InterfaceIndex : null;
+            ? new((int)row.InterfaceIndex, new IPAddress(BitConverter.GetBytes(row.NextHop.IPv4)), row.Metric, row.PrefixLength) : null;
     }
+
+    public static uint? DefaultRouteMetric(int interfaceIndex) => Read()
+        .Where(row => row.InterfaceIndex == interfaceIndex && row.PrefixLength == 0)
+        .Select(row => (uint?)row.Metric).Min();
 
     public static Interface ReadInterface(int index)
     {

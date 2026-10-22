@@ -15,7 +15,9 @@ LinkWeaver is a free Windows 11 multipath tunnel that bonds Ethernet, Wi-Fi hots
 | [Development and releases](docs/DEVELOPMENT.md) | Build, test, package, sign, and publish LinkWeaver. |
 | [Security policy](SECURITY.md) | Trust model, credential handling, release verification, and vulnerability reports. |
 
-## Consistent network recovery — 2.3.0
+## Network recovery — 2.3.1
+
+The 2.3.1 recovery update detects active WireGuard tunnels automatically, including when an older saved Proton-safe setting was disabled. Endpoint discovery and route errors keep adapter monitoring visible. The window title shows the installed version.
 
 LinkWeaver 2.3.0 replaces PowerShell route changes in the monitoring loop with native Windows IP Helper calls. Existing host routes are updated in place, and the route Windows actually chooses is verified. WireGuard remains running throughout a handoff.
 
@@ -26,6 +28,8 @@ Tunnel verification runs separately and binds to the tunnel interface. It cannot
 The relay path fixes repeated socket reconnects, stale failed-path quality, redundant-path liveness and packets stuck indefinitely in reorder buffers. Redundant mode forwards the first authenticated packet copy immediately; other modes flush reorder gaps after 25 ms. Logging rotates and history/chart work is throttled.
 
 Read the [complete connectivity audit and test breakdown](docs/CONNECTIVITY-AUDIT.md). For timestamped end-to-end loss and public-IP observations, run [Test-Continuity.ps1](scripts/Test-Continuity.ps1).
+
+The [adapter recovery regression checks](docs/ADAPTER-RECOVERY-TESTING.md) cover Ethernet/Wi-Fi switching with and without WireGuard, DHCP route repair, live peer-endpoint refresh and the dual-adapter acceptance matrix.
 
 Direct WireGuard failover has a detection and roaming interval. Stable VPN IP alone cannot guarantee no lost packets or no GTA session disconnect. For continuity through one-path failure without waiting for detection, the existing relay **Redundant** mode copies traffic continuously over independent links and keeps one VPS exit IP; it uses roughly twice the data on two paths. Use one exit tunnel for a session and keep the backup connected.
 

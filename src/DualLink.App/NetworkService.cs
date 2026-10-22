@@ -24,6 +24,13 @@ public sealed class NetworkService
     private string? _probeRouteSignature;
     private DateTimeOffset _lastProbeRouteAudit;
     private readonly HashSet<int> _cleanedInterfaces = [];
+    private readonly WireGuardRouteCoordinator _wireGuardRoutes = new(new NativeWireGuardRouteTable());
+    private readonly PhysicalRouteCoordinator _physicalRoutes = new(
+        (index, metric) => WindowsRouteTable.SetMetric(index, metric),
+        WindowsRouteTable.DefaultRouteMetric,
+        // This destination has no physical probe exception, so the route lookup
+        // proves ordinary traffic follows the selected adapter's preference.
+        () => WindowsRouteTable.BestInterface(IPAddress.Parse(ConnectivityPolicy.TunnelTargets[0])));
 
     public IReadOnlyDictionary<string, AdapterByteCounters> GetAdapterByteCounters()
     {
@@ -60,11 +67,7 @@ public sealed class NetworkService
             var output = await RunAsync(executable, "show all endpoints", deadline.Token);
             var names = NetworkInterface.GetAllNetworkInterfaces().Where(x => x.OperationalStatus == OperationalStatus.Up)
                 .Select(x => x.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            var endpoints = output.Split('\n').Select(line => line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
-                .Where(fields => fields.Length == 3 && names.Contains(fields[0]))
-                .Select(fields => fields[2].Split(':')[0]).Select(value => IPAddress.TryParse(value, out var ip) ? ip : null)
-                .Where(ip => ip?.AddressFamily == AddressFamily.InterNetwork).Distinct().ToArray();
-            return endpoints.Length == 1 ? endpoints[0] : null;
+            return WireGuardEndpointParser.Parse(output, names);
         }
         catch (Exception error) when (error is Win32Exception or InvalidOperationException or OperationCanceledException) { return null; }
     }
@@ -270,13 +273,13 @@ public sealed class NetworkService
 
     public Task ApplyMetricsAsync(IEnumerable<AdapterInfo> adapters, string preferredId, int preferredMetric, int backupMetric)
     {
-        // Promote the selected default path before demoting others. WireGuard's
-        // underlay/MTU selection also observes default routes and interface metrics.
-        foreach (var adapter in adapters.Where(IsUsable).OrderByDescending(x => x.Id == preferredId))
-        {
-            var metric = adapter.Id == preferredId ? preferredMetric : backupMetric;
-            WindowsRouteTable.SetMetric(adapter.InterfaceIndex, metric);
-        }
+        // WireGuard may start between the monitor's snapshot and this call.
+        // Never try to prove ordinary traffic bypasses a newly active tunnel.
+        if (IsProtonTunnelActive())
+            throw new InvalidOperationException("WireGuard became active; waiting for protected endpoint routing.");
+        if (!_physicalRoutes.Apply(adapters.ToArray(), preferredId, preferredMetric, backupMetric,
+                (backup, error) => AppLog.Write($"Standby interface metric for {backup.Name}: {error.Message}")))
+            throw new InvalidOperationException("Windows could not apply the selected Internet adapter's route preference.");
         return Task.CompletedTask;
     }
 
@@ -295,26 +298,22 @@ public sealed class NetworkService
         }
     }
 
-    public async Task<bool> MoveWireGuardEndpointRouteAsync(IReadOnlyList<AdapterInfo> adapters,
+    public Task<bool> MoveWireGuardEndpointRouteAsync(IReadOnlyList<AdapterInfo> adapters,
         IPAddress endpoint, AdapterInfo selected)
     {
-        if (!IsUsable(selected)) return false;
+        return Task.FromResult(_wireGuardRoutes.Reconcile(adapters, endpoint, selected,
+            (backup, error) => AppLog.Write($"Standby endpoint route for {backup.Name}: {error.Message}")));
+    }
 
-        // Native updates preserve existing rows and avoid process launch latency.
-        // Keep both the exact endpoint route and default-interface preference in
-        // agreement, then ask Windows for the actual winning route.
-        WindowsRouteTable.EnsureHost(endpoint, selected.InterfaceIndex, selected.Gateway!, 1);
-        WindowsRouteTable.SetMetric(selected.InterfaceIndex, 5);
-        foreach (var backup in adapters.Where(x => x.Id != selected.Id && IsUsable(x)))
-        {
-            try
-            {
-                WindowsRouteTable.EnsureHost(endpoint, backup.InterfaceIndex, backup.Gateway!, 5000);
-                WindowsRouteTable.SetMetric(backup.InterfaceIndex, 500);
-            }
-            catch (Win32Exception error) { AppLog.Write($"Standby endpoint route for {backup.Name}: {error.Message}"); }
-        }
-        return await GetPreferredRouteInterfaceAsync(endpoint) == selected.InterfaceIndex;
+    public Task<bool> IsWireGuardEndpointRouteCurrentAsync(IPAddress endpoint, AdapterInfo selected) =>
+        Task.FromResult(_wireGuardRoutes.IsCurrent(endpoint, selected));
+
+    private sealed class NativeWireGuardRouteTable : IWireGuardRouteTable
+    {
+        public void EnsureHost(IPAddress destination, int interfaceIndex, IPAddress gateway, int metric) =>
+            WindowsRouteTable.EnsureHost(destination, interfaceIndex, gateway, metric);
+        public void SetMetric(int interfaceIndex, int metric) => WindowsRouteTable.SetMetric(interfaceIndex, metric);
+        public WireGuardEndpointRoute? BestRoute(IPAddress destination) => WindowsRouteTable.BestRoute(destination);
     }
 
     public async Task ApplyBondingEndpointRoutesAsync(IEnumerable<AdapterInfo> adapters, IPAddress endpoint)

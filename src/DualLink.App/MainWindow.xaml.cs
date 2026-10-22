@@ -20,12 +20,17 @@ public partial class MainWindow : Window
     private readonly DualLinkSettings _settings = new();
     private readonly NetworkService _network = new();
     private readonly WireGuardConfigService _wireGuardConfig = new();
+    private readonly WireGuardPeerService _wireGuardPeer = new();
     private readonly ServerProvisioner _serverProvisioner = new();
     private readonly CancellationTokenSource _stop = new();
     private FailoverController _controller;
     private string? _selectedPreferenceId;
     private string? _lastAppliedId;
     private string? _wireGuardRoutedId;
+    private string? _wireGuardRouteIdentity;
+    private string? _physicalRouteSignature;
+    private bool _wasWireGuardActive;
+    private DateTimeOffset _lastPhysicalRouteAudit = DateTimeOffset.MinValue;
     private bool _updatingChoices;
     private System.Net.IPAddress? _wireGuardEndpoint;
     private string? _endpointRouteSignature;
@@ -58,13 +63,14 @@ public partial class MainWindow : Window
     private Task<string?>? _publicIpProbeTask;
     private DateTimeOffset _lastWireGuardRouteAudit = DateTimeOffset.MinValue;
     private CancellationTokenSource? _probeRound;
-    private CancellationTokenSource? _tunnelVerificationCancellation;
-    private Task<bool>? _tunnelVerification;
-    private string? _tunnelVerificationIdentity;
+    private readonly EpochOperation<bool> _tunnelVerification = new();
     private DateTimeOffset _lastTunnelVerification;
+    private readonly EpochOperation<bool> _endpointRefresh = new();
+    private DateTimeOffset _lastEndpointRefresh = DateTimeOffset.MinValue;
     private readonly Dictionary<string, string> _adapterIdentities = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, ProbeResult> _latestGoodProbes = new(StringComparer.OrdinalIgnoreCase);
     private string? _lastMonitorMessage;
+    private string? _lastRouteError;
     private DateTimeOffset _lastUiUpdate;
     private bool _preferenceInitialized;
     private Task<IPAddress?>? _endpointObservation;
@@ -76,6 +82,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        Title = $"LinkWeaver {typeof(MainWindow).Assembly.GetName().Version?.ToString(3)}";
         StartWithWindowsCheck.IsChecked = StartupService.IsEnabled();
         StartWithWindowsCheck.Checked += StartWithWindowsCheck_Changed;
         StartWithWindowsCheck.Unchecked += StartWithWindowsCheck_Changed;
@@ -91,14 +98,11 @@ public partial class MainWindow : Window
             ResponseProfileCombo.SelectedItem = ResponseProfileCombo.Items.Cast<ComboBoxItem>()
                 .FirstOrDefault(x => x.Tag?.ToString() == monitorSettings.Response) ?? ResponseProfileCombo.SelectedItem;
             AutoCheck.IsChecked = monitorSettings.AutoRoutes;
-            ProtonModeCheck.IsChecked = monitorSettings.ProtonSafe;
             BondingModeCombo.SelectedItem = BondingModeCombo.Items.Cast<ComboBoxItem>()
                 .FirstOrDefault(x => x.Content?.ToString() == monitorSettings.BondingMode) ?? BondingModeCombo.SelectedItem;
         }
         AutoCheck.Checked += MonitorOptionChanged;
         AutoCheck.Unchecked += MonitorOptionChanged;
-        ProtonModeCheck.Checked += MonitorOptionChanged;
-        ProtonModeCheck.Unchecked += MonitorOptionChanged;
         BondingModeCombo.SelectionChanged += MonitorOptionChanged;
         if (BondingSettingsStore.Load() is { } saved)
         {
@@ -234,6 +238,18 @@ public partial class MainWindow : Window
         {
             using var round = CancellationTokenSource.CreateLinkedTokenSource(_stop.Token);
             _probeRound = round;
+            string? routeError = null;
+            async Task<bool> TryRouteAsync(Func<Task> action)
+            {
+                var error = await RouteManagementAttempt.RunAsync(action);
+                if (error is null) return true;
+                _lastAppliedId = null;
+                routeError = error;
+                if (_lastRouteError != error)
+                    AppLog.Write($"Route management will retry while adapter monitoring continues: {error}");
+                _lastRouteError = error;
+                return false;
+            }
             var adapters = _network.GetInternetAdapters();
             var identities = adapters.ToDictionary(x => x.Id, AdapterIdentity, StringComparer.OrdinalIgnoreCase);
             foreach (var removed in _adapterIdentities.Keys.Where(id => !identities.ContainsKey(id)).ToArray())
@@ -253,23 +269,47 @@ public partial class MainWindow : Window
                     _latestGoodProbes.Remove(adapter.Id);
                     _stableProbes.Remove(adapter.Id);
                     if (adapter.Id == _lastAppliedId) _lastAppliedId = null;
+                    if (adapter.Id == _wireGuardRoutedId)
+                    {
+                        _wireGuardRouteIdentity = null;
+                        _lastWireGuardRouteAudit = DateTimeOffset.MinValue;
+                        CancelTunnelVerification();
+                        CancelEndpointRefresh();
+                    }
                 }
                 _adapterIdentities[adapter.Id] = identities[adapter.Id];
             }
             if (!adapters.Any(x => x.Id == _lastAppliedId && NetworkService.IsUsable(x))) _lastAppliedId = null;
-            var protonActive = ProtonModeCheck.IsChecked == true && _network.IsProtonTunnelActive();
+            // The running tunnel, rather than a saved UI preference, determines
+            // route ownership. A physical route proof must never reject the VPN
+            // for correctly carrying ordinary Internet traffic.
+            var protonActive = _network.IsProtonTunnelActive();
+            WireGuardModeText.Text = protonActive ? "WireGuard: detected" : "WireGuard: inactive";
+            if (protonActive != _wasWireGuardActive)
+            {
+                _wasWireGuardActive = protonActive;
+                _lastAppliedId = null;
+                _physicalRouteSignature = null;
+                _wireGuardRouteIdentity = null;
+                _lastWireGuardRouteAudit = DateTimeOffset.MinValue;
+            }
             if (protonActive) ObserveWireGuardEndpoint();
             if (!protonActive)
             {
                 _wireGuardRoutedId = null;
+                _wireGuardRouteIdentity = null;
                 CancelTunnelVerification();
+                CancelEndpointRefresh();
             }
             else if (_wireGuardRoutedId is null && _wireGuardEndpoint is not null)
             {
                 var index = await _network.GetPreferredRouteInterfaceAsync(_wireGuardEndpoint);
                 _wireGuardRoutedId = adapters.FirstOrDefault(x => x.InterfaceIndex == index && NetworkService.IsUsable(x))?.Id;
             }
-            var manage = _serverSetupCancellation is null && _bonding is null && AutoCheck.IsChecked == true;
+            var routeMode = RouteManagementPolicy.Resolve(protonActive, _bonding is not null, _wireGuardEndpoint is not null);
+            var manage = _serverSetupCancellation is null && AutoCheck.IsChecked == true &&
+                routeMode is RouteManagementMode.Physical or RouteManagementMode.WireGuard;
+            if (!manage) _physicalRouteSignature = null;
             var failedCarryingPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             if (_bonding is not null)
             {
@@ -286,7 +326,7 @@ public partial class MainWindow : Window
             if (manage && carryingId is not null && !adapters.Any(x => x.Id == carryingId && NetworkService.IsUsable(x)))
             {
                 var standby = RecentStandby(adapters, carryingId, allowRejected: true);
-                if (standby is not null) await SwitchPathAsync(standby, adapters, protonActive);
+                if (standby is not null) await TryRouteAsync(() => SwitchPathAsync(standby, adapters, protonActive));
             }
 
             await _network.PrepareProbeRoutesAsync(adapters, protonActive);
@@ -310,7 +350,7 @@ public partial class MainWindow : Window
                         .Where(x => tasks[x.Id].IsCompletedSuccessfully && tasks[x.Id].Result.Online)
                         .OrderByDescending(x => tasks[x.Id].Result.Score).FirstOrDefault()
                         ?? RecentStandby(adapters, carryingId, allowRejected: true);
-                    if (standby is not null) await SwitchPathAsync(standby, adapters, protonActive);
+                    if (standby is not null) await TryRouteAsync(() => SwitchPathAsync(standby, adapters, protonActive));
                 }
             }
             else if (manage && carryingId is null && tasks.Count > 0)
@@ -329,7 +369,8 @@ public partial class MainWindow : Window
             round.Token.ThrowIfCancellationRequested();
             // Reject results from a topology that changed while its sockets ran.
             var current = _network.GetInternetAdapters();
-            if (current.Count != adapters.Count || current.Any(x => !identities.TryGetValue(x.Id, out var identity) || identity != AdapterIdentity(x)))
+            if (_network.IsProtonTunnelActive() != protonActive || current.Count != adapters.Count ||
+                current.Any(x => !identities.TryGetValue(x.Id, out var identity) || identity != AdapterIdentity(x)))
             {
                 WakeNetworkMonitor();
                 return;
@@ -348,25 +389,35 @@ public partial class MainWindow : Window
                 new ProbeResult(adapter.Id, DateTimeOffset.UtcNow, false, 0, 0, 100, 0,
                     NetworkService.IsUsable(adapter) ? "Checking Internet reachability" : "Physical link unavailable")).ToArray();
             _controller.Synchronize(protonActive ? _wireGuardRoutedId : _lastAppliedId);
-            var decision = ChooseConnection(protonActive ? probes.Where(x =>
-                _tunnelRecovery.IsEligible(x.AdapterId, DateTimeOffset.UtcNow)).ToArray() : probes);
+            var decision = ChooseConnection(protonActive ? _tunnelRecovery.EligibleProbes(probes, DateTimeOffset.UtcNow) : probes);
             if (manage && decision.ActiveAdapterId is not null)
             {
                 var requested = adapters.First(x => x.Id == decision.ActiveAdapterId);
                 var actual = protonActive ? _wireGuardRoutedId : _lastAppliedId;
                 if (!string.Equals(actual, requested.Id, StringComparison.OrdinalIgnoreCase))
                 {
-                    await SwitchPathAsync(requested, adapters, protonActive);
-                    decision = decision with { Reason = $"Routed to {requested.Name}; {(protonActive ? "verifying WireGuard without restarting it" : "Internet path verified")}" };
+                    if (await TryRouteAsync(() => SwitchPathAsync(requested, adapters, protonActive)))
+                        decision = decision with { Reason = $"Routed to {requested.Name}; {(protonActive ? "verifying WireGuard without restarting it" : "Internet path verified")}" };
+                }
+                else if (!protonActive && (_physicalRouteSignature != PhysicalRouteSignature(adapters, requested.Id) ||
+                    DateTimeOffset.UtcNow - _lastPhysicalRouteAudit >= TimeSpan.FromSeconds(2)))
+                {
+                    // Reconnected standby NICs can regain automatic metrics;
+                    // reapply preference even when the selected adapter ID stays the same.
+                    await TryRouteAsync(() => SwitchPathAsync(requested, adapters, wireGuard: false));
                 }
             }
             if (manage && protonActive)
             {
-                await AuditWireGuardEndpointRouteAsync(adapters);
-                await PollTunnelVerificationAsync(adapters);
+                if (await TryRouteAsync(() => AuditWireGuardEndpointRouteAsync(adapters)))
+                    await TryRouteAsync(() => PollTunnelVerificationAsync(adapters));
                 if (_wireGuardRoutedId is not null && _lastAppliedId != _wireGuardRoutedId)
                     decision = decision with { Reason = $"WireGuard routed to {adapters.FirstOrDefault(x => x.Id == _wireGuardRoutedId)?.Name}; tunnel verification pending" };
             }
+            if (routeMode == RouteManagementMode.WaitingForWireGuardEndpoint)
+                decision = decision with { Reason = "WireGuard detected; discovering its active endpoint while monitoring adapters" };
+            else if (routeMode == RouteManagementMode.ConflictingTunnels)
+                decision = decision with { Reason = "WireGuard and relay bonding are both active; stop one tunnel to restore a single managed route" };
             var confirmedActiveId = _lastAppliedId;
 
             _rows.Clear();
@@ -440,13 +491,13 @@ public partial class MainWindow : Window
                 }
             }
             StatusText.Text = decision.Reason;
-            VpnText.Text = ProtonModeCheck.IsChecked == true
-                ? protonActive
-                    ? _wireGuardEndpoint is not null
-                        ? "WireGuard tunnel detected. Dual-path endpoint routing and protected internet probes are active."
-                        : "WireGuard detected, but no prepared Proton config is registered. Deactivate it and use Prepare Proton config."
-                    : "Proton-safe mode is enabled, but no active Proton/WireGuard tunnel was detected. Connect Proton before opening GTA."
-                : "Proton-safe mode is off. Switching between router and hotspot will change GTA's public IP.";
+            VpnText.Text = protonActive
+                ? _wireGuardEndpoint is null
+                    ? "WireGuard detected automatically. Waiting for its IPv4 endpoint; adapter monitoring continues. Use the official WireGuard app with a prepared configuration."
+                    : AutoCheck.IsChecked == true
+                        ? "WireGuard detected automatically. Protected endpoint failover is active."
+                        : "WireGuard detected automatically. Enable Manage routes automatically to allow protected endpoint failover."
+                : "WireGuard is inactive. Switching Internet providers can change your public IP.";
             VpnText.Foreground = new SolidColorBrush(protonActive ? MediaColor.FromRgb(134, 239, 172) : MediaColor.FromRgb(253, 230, 138));
             StatusDot.Fill = new SolidColorBrush(probes.Any(x => x.Online) ? MediaColor.FromRgb(34, 197, 94) : MediaColor.FromRgb(239, 68, 68));
             if (_bonding is not null)
@@ -462,6 +513,17 @@ public partial class MainWindow : Window
                 StatusDot.Fill = new SolidColorBrush(MediaColor.FromRgb(253, 230, 138));
             if (protonActive && probes.Any(x => x.Online))
                 StatusText.Text = $"{decision.Reason} — measuring each physical internet path while WireGuard is connected";
+            if (routeMode == RouteManagementMode.ConflictingTunnels)
+            {
+                VpnText.Text = decision.Reason;
+                StatusDot.Fill = MediaBrushes.Red;
+            }
+            if (routeError is not null)
+            {
+                StatusText.Text = $"{routeError} Adapter monitoring continues; routing will retry automatically.";
+                StatusDot.Fill = MediaBrushes.Red;
+            }
+            else _lastRouteError = null;
             if (_lastMonitorMessage != decision.Reason)
             {
                 AppLog.Write(decision.Reason);
@@ -485,6 +547,9 @@ public partial class MainWindow : Window
 
     private static string AdapterIdentity(AdapterInfo x) => $"{x.Id}:{x.Status}:{x.InterfaceIndex}:{x.Address}:{x.Gateway}";
 
+    private static string PhysicalRouteSignature(IReadOnlyList<AdapterInfo> adapters, string selected) =>
+        selected + "|" + string.Join('|', adapters.OrderBy(x => x.Id, StringComparer.OrdinalIgnoreCase).Select(AdapterIdentity));
+
     private void ObserveWireGuardEndpoint()
     {
         if (_endpointObservation is { IsCompleted: true } completed)
@@ -494,9 +559,11 @@ public partial class MainWindow : Window
                 AppLog.Write($"Observed active WireGuard endpoint {endpoint}; replacing stale prepared endpoint {_wireGuardEndpoint}.");
                 _wireGuardEndpoint = endpoint;
                 _wireGuardRoutedId = null;
+                _wireGuardRouteIdentity = null;
                 _lastAppliedId = null;
                 _endpointRouteSignature = null;
                 CancelTunnelVerification();
+                CancelEndpointRefresh();
             }
             _endpointObservation = null;
         }
@@ -517,6 +584,9 @@ public partial class MainWindow : Window
     private async Task SwitchPathAsync(AdapterInfo selected, IReadOnlyList<AdapterInfo> adapters, bool wireGuard)
     {
         if (!NetworkService.IsUsable(selected)) return;
+        if (_network.IsProtonTunnelActive() != wireGuard)
+            throw new OperationCanceledException("WireGuard state changed during path selection.");
+        _lastAppliedId = null;
         if (wireGuard)
         {
             if (_wireGuardEndpoint is null)
@@ -527,58 +597,76 @@ public partial class MainWindow : Window
                 throw new InvalidOperationException($"Windows could not route the WireGuard endpoint through {selected.Name}.");
             _wireGuardRoutedId = selected.Id;
             _endpointRouteSignature = null;
-            _lastAppliedId = null;
-            CancelTunnelVerification();
-            _lastTunnelVerification = DateTimeOffset.MinValue;
+            BeginTunnelRecovery(selected);
             AppLog.Write($"WireGuard endpoint routed to {selected.Name} (ifIndex {selected.InterfaceIndex}, gateway {selected.Gateway}); tunnel stays running.");
         }
         else
         {
             await _network.ApplyMetricsAsync(adapters, selected.Id, _settings.PreferredMetric, _settings.BackupMetric);
             _lastAppliedId = selected.Id;
+            _physicalRouteSignature = PhysicalRouteSignature(adapters, selected.Id);
+            _lastPhysicalRouteAudit = DateTimeOffset.UtcNow;
         }
         _controller.Synchronize(selected.Id);
     }
 
-    private void CancelTunnelVerification()
+    private void CancelTunnelVerification() => _tunnelVerification.Cancel();
+
+    private string TunnelIdentity(AdapterInfo adapter) => $"{_wireGuardEndpoint}|{AdapterIdentity(adapter)}";
+
+    private void BeginTunnelRecovery(AdapterInfo adapter)
     {
-        _tunnelVerificationCancellation?.Cancel();
-        _tunnelVerificationCancellation?.Dispose();
-        _tunnelVerificationCancellation = null;
-        _tunnelVerification = null;
-        _tunnelVerificationIdentity = null;
+        _wireGuardRouteIdentity = TunnelIdentity(adapter);
+        _lastAppliedId = null;
+        CancelTunnelVerification();
+        CancelEndpointRefresh();
+        _lastTunnelVerification = DateTimeOffset.MinValue;
+        _tunnelRecovery.RouteChanged(adapter.Id, _wireGuardRouteIdentity, DateTimeOffset.UtcNow);
     }
+
+    private void CancelEndpointRefresh() => _endpointRefresh.Cancel();
 
     private async Task PollTunnelVerificationAsync(IReadOnlyList<AdapterInfo> adapters)
     {
         var routed = adapters.FirstOrDefault(x => x.Id == _wireGuardRoutedId && NetworkService.IsUsable(x));
-        if (routed is null) { CancelTunnelVerification(); _lastAppliedId = null; return; }
-        var identity = $"{_wireGuardEndpoint}|{AdapterIdentity(routed)}";
-        if (_tunnelVerification is { IsCompleted: true } completed)
+        if (routed is null) { CancelTunnelVerification(); CancelEndpointRefresh(); _lastAppliedId = null; return; }
+        var identity = TunnelIdentity(routed);
+        if (_endpointRefresh.TryComplete(identity, out var restored) && restored)
         {
-            if (_tunnelVerificationIdentity == identity)
+            // Reapplying only the existing peer endpoint clears WireGuardNT's
+            // cached source/interface. Keys and the live tunnel stay intact.
+            BeginTunnelRecovery(routed);
+            AppLog.Write($"Refreshed the existing WireGuard peer endpoint on {routed.Name}; verifying the live tunnel.");
+        }
+        if (_tunnelVerification.TryComplete(identity, out var verified))
+        {
+            _lastAppliedId = verified && _latestGoodProbes.ContainsKey(routed.Id) ? routed.Id : null;
+            if (_tunnelRecovery.Observe(routed.Id, identity, verified, DateTimeOffset.UtcNow))
             {
-                var verified = completed.IsCompletedSuccessfully && completed.Result;
-                _lastAppliedId = verified && _latestGoodProbes.ContainsKey(routed.Id) ? routed.Id : null;
-                if (_tunnelRecovery.Observe(routed.Id, identity, verified))
+                if (!_endpointRefresh.IsPending && _wireGuardEndpoint is not null &&
+                    DateTimeOffset.UtcNow - _lastEndpointRefresh >= TimeSpan.FromSeconds(15))
+                {
+                    _lastEndpointRefresh = DateTimeOffset.UtcNow;
+                    var endpoint = _wireGuardEndpoint;
+                    _endpointRefresh.Start(identity, token => _wireGuardPeer.RefreshEndpointAsync(endpoint, token), _stop.Token);
+                    AppLog.Write($"WireGuard traffic stalled on {routed.Name}; refreshing its existing peer endpoint without restarting the tunnel.");
+                }
+                else if (!_endpointRefresh.IsPending)
                 {
                     var standby = RecentStandby(adapters, routed.Id);
                     if (standby is not null)
                     {
                         _tunnelRecovery.Reject(routed.Id, DateTimeOffset.UtcNow);
-                        AppLog.Write($"WireGuard failed two independent tunnel verification rounds on {routed.Name}; trying {standby.Name} with a 15-second retry cooldown.");
+                        AppLog.Write($"WireGuard failed repeated tunnel verification on {routed.Name}; trying {standby.Name} with a 15-second retry cooldown.");
                         await SwitchPathAsync(standby, adapters, wireGuard: true);
                         return;
                     }
                 }
             }
-            CancelTunnelVerification();
         }
-        if (_tunnelVerification is not null || DateTimeOffset.UtcNow - _lastTunnelVerification < TimeSpan.FromMilliseconds(500)) return;
+        if (_tunnelVerification.IsPending || DateTimeOffset.UtcNow - _lastTunnelVerification < TimeSpan.FromMilliseconds(500)) return;
         _lastTunnelVerification = DateTimeOffset.UtcNow;
-        _tunnelVerificationIdentity = identity;
-        _tunnelVerificationCancellation = CancellationTokenSource.CreateLinkedTokenSource(_stop.Token);
-        _tunnelVerification = _network.VerifyRoutedInternetAsync(_tunnelVerificationCancellation.Token);
+        _tunnelVerification.Start(identity, _network.VerifyRoutedInternetAsync, _stop.Token);
     }
 
     private async Task UpdateBondedLatencyAsync()
@@ -1053,6 +1141,8 @@ public partial class MainWindow : Window
 
     private async Task AuditWireGuardEndpointRouteAsync(IReadOnlyList<AdapterInfo> adapters)
     {
+        if (!_network.IsProtonTunnelActive())
+            throw new OperationCanceledException("WireGuard stopped during endpoint route audit.");
         if (_wireGuardEndpoint is null || _wireGuardRoutedId is null ||
             DateTimeOffset.UtcNow - _lastWireGuardRouteAudit < TimeSpan.FromSeconds(2))
             return;
@@ -1061,15 +1151,15 @@ public partial class MainWindow : Window
         var expected = adapters.FirstOrDefault(x => string.Equals(
             x.Id, _wireGuardRoutedId, StringComparison.OrdinalIgnoreCase));
         if (expected is null || !NetworkService.IsUsable(expected)) return;
-        if (await _network.GetPreferredRouteInterfaceAsync(_wireGuardEndpoint) == expected.InterfaceIndex)
+        if (_wireGuardRouteIdentity == TunnelIdentity(expected) &&
+            await _network.IsWireGuardEndpointRouteCurrentAsync(_wireGuardEndpoint, expected))
             return;
 
         AppLog.Write($"WireGuard endpoint route drift detected; restoring {expected.Name} without restarting the tunnel.");
         if (await _network.MoveWireGuardEndpointRouteAsync(adapters, _wireGuardEndpoint, expected))
         {
             _endpointRouteSignature = null;
-            _lastAppliedId = null;
-            CancelTunnelVerification();
+            BeginTunnelRecovery(expected);
         }
     }
 
@@ -1094,7 +1184,7 @@ public partial class MainWindow : Window
 
     private void SaveMonitorSettings() => MonitorSettingsStore.Save(new(_selectedPreferenceId,
         (ResponseProfileCombo.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "Balanced",
-        AutoCheck.IsChecked == true, ProtonModeCheck.IsChecked == true,
+        AutoCheck.IsChecked == true, true, // Keep the legacy field compatible; active tunnel detection owns the mode.
         (BondingModeCombo.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "Bonding"));
 
     private async void ProbeNow_Click(object sender, RoutedEventArgs e) => await RefreshAsync();
@@ -1137,6 +1227,7 @@ public partial class MainWindow : Window
         await _network.RestoreManagedRoutesAsync(_network.GetInternetAdapters(), _wireGuardEndpoint);
         _endpointRouteSignature = null;
         _wireGuardRoutedId = null;
+        _wireGuardRouteIdentity = null;
         _controller = new FailoverController(_settings);
         StatusText.Text = "Windows automatic metrics restored";
     }
@@ -1149,6 +1240,7 @@ public partial class MainWindow : Window
         _probeScheduler.Dispose();
         SaveMonitorSettings();
         CancelTunnelVerification();
+        CancelEndpointRefresh();
         ConnectionHistoryStore.Save(new(_historySamples, _historyEvents));
         if (_bonding is not null) await StopBondingAsync();
         base.OnClosed(e);
