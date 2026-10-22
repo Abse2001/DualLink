@@ -22,7 +22,14 @@ jobs:
       - name: Restore
         run: dotnet restore DualLink.sln
       - name: Test
-        run: dotnet test DualLink.sln --configuration Release --no-restore
+        run: dotnet test DualLink.sln --configuration Release --no-restore --logger "trx;LogFileName=windows.trx" --results-directory TestResults
+      - name: Keep Windows test results
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: Windows-test-results
+          path: TestResults/*.trx
+          if-no-files-found: ignore
       - name: Build Windows application
         run: dotnet build src/DualLink.App/DualLink.App.csproj --configuration Release --no-restore
       - name: Publish self-contained app without executable packing
@@ -155,7 +162,14 @@ jobs:
         with:
           dotnet-version: '8.0.x'
       - name: Test shared protocol
-        run: dotnet test tests/DualLink.Tests/DualLink.Tests.csproj -c Release
+        run: dotnet test tests/DualLink.Tests/DualLink.Tests.csproj -c Release --logger "trx;LogFileName=linux.trx" --results-directory TestResults
+      - name: Keep Linux test results
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: Linux-test-results
+          path: TestResults/*.trx
+          if-no-files-found: ignore
       - name: Publish Linux relay
         run: dotnet publish src/DualLink.Relay/DualLink.Relay.csproj -c Release -r linux-x64 --self-contained true -p:PublishSingleFile=true -o relay-package
       - name: Smoke-test Linux TUN relay

@@ -9,5 +9,6 @@
   <ItemGroup>
     <Compile Include="..\..\src\DualLink.App\BondingTransport.cs" Link="Integration\BondingTransport.cs" />
     <Compile Include="..\..\src\DualLink.App\WindowsRouteTable.cs" Link="Integration\WindowsRouteTable.cs" />
+    <Compile Include="..\..\src\DualLink.App\WireGuardPeerService.cs" Link="Integration\WireGuardPeerService.cs" />
   </ItemGroup>
 </Project>
